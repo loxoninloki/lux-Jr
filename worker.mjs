@@ -84,7 +84,7 @@ export class BudgetLedger {
     if (state.reservedYen + reserve > budget) return json({ error: '今月のアプリ予算上限に達しました。設定画面で利用量をご確認ください。' }, 429);
     state.requests++; state.reservedYen += reserve; state.budgetYen = budget;
     await this.ctx.storage.put({ usage: state, rate: [...recent, Date.now()] });
-    const body = { systemInstruction: { parts: [{ text: `${SYSTEM}\n<user_memories>\n${JSON.stringify(payload.memories)}\n</user_memories>` }] }, contents: payload.messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.text }] })), generationConfig: { maxOutputTokens: MAX_OUTPUT, temperature: 0.75, thinkingConfig: { thinkingBudget: 0 } } };
+    const body = { systemInstruction: { parts: [{ text: `${SYSTEM}\n<user_memories>\n${JSON.stringify(payload.memories)}\n</user_memories>` }] }, contents: payload.messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.text }] })), generationConfig: { maxOutputTokens: MAX_OUTPUT, temperature: 0.75, thinkingConfig: { thinkingLevel: 'minimal' } } };
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       let response;
       try {
