@@ -12,3 +12,11 @@ test('budget cap blocks upstream calls and survives object recreation', async ()
 test('429 is not retried; reservation persists', async () => { const original=globalThis.fetch; let calls=0; globalThis.fetch=async()=>{ calls++; return new Response('{}',{status:429}); }; try { const ctx=context(); const response=await new BudgetLedger(ctx,env()).fetch(request()); assert.equal(response.status,429); assert.equal(calls,1); assert.ok((await ctx.storage.get('usage')).reservedYen>0); } finally { globalThis.fetch=original; } });
 test('503 recovers with bounded retry and records token usage', async () => { const original=globalThis.fetch; let calls=0; globalThis.fetch=async()=>++calls===1 ? new Response('{}',{status:503}) : Response.json({candidates:[{content:{parts:[{text:'おかえりなさい、ロキ様。'}]}}],usageMetadata:{promptTokenCount:100,candidatesTokenCount:20}}); try { const response=await new BudgetLedger(context(),env()).fetch(request()); const result=await response.json(); assert.equal(response.status,200); assert.equal(calls,2); assert.equal(result.usage.inputTokens,100); assert.ok(result.text.includes('ロキ様')); } finally {globalThis.fetch=original;} });
 test('rate limit is persisted across objects', async()=>{ const recent=Array(6).fill(Date.now()); const response=await new BudgetLedger(context({rate:recent}),env()).fetch(request()); assert.equal(response.status,429); });
+
+test('voice mode uses a spoken reply instruction and rejects arbitrary mode values', async () => {
+  const { systemInstruction } = await import('./worker.mjs');
+  const base={model:MODEL,messages:[{role:'user',text:'こんにちは'}],memories:[]};
+  assert.match(systemInstruction({...base,voiceMode:true}),/現在は音声会話モード/);
+  assert.doesNotMatch(systemInstruction(base),/現在は音声会話モード/);
+  assert.throws(()=>validate({...base,voiceMode:'true'}));
+});

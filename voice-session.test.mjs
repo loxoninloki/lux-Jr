@@ -5,7 +5,7 @@ const flush = async () => { for(let i=0;i<12;i++) await Promise.resolve(); };
 function setup(overrides={}) {
   const recognizers=[], requests=[], spoken=[], errors=[], phases=[];
   const session=new VoiceSession({
-    createRecognition:()=>{const rec={start(){},stop(){this.stopped=true},abort(){this.aborted=true}};recognizers.push(rec);return rec},
+    createRecognition:()=>{const rec={start(){this.onstart?.()},stop(){this.stopped=true},abort(){this.aborted=true}};recognizers.push(rec);return rec},
     request:async(text,signal)=>{requests.push({text,signal});return 'お返事です。'},
     speak:async(text)=>{spoken.push(text)}, cancelSpeech(){},
     phase:p=>phases.push(p),transcript(){},error:e=>errors.push(e),wait:async()=>{},...overrides,
@@ -37,12 +37,41 @@ test('playback denial pauses with a user-gesture retry and does not send again',
  t.session.start();t.result(t.recognizers[0]);t.recognizers[0].onend();await flush();assert.equal(t.session.phase,'paused');assert.equal(t.recognizers.length,1);
  t.session.resume();await flush();assert.equal(plays,2);assert.equal(t.requests.length,1);assert.equal(t.recognizers.length,2);t.session.stop();
 });
-test('permission failure, silence and 429 end the session without retries',async()=>{
- const t=setup();t.session.start();t.recognizers[0].onerror({error:'not-allowed'});assert.equal(t.session.phase,'idle');assert.match(t.errors.at(-1),/許可/);
- t.session.start();t.recognizers[1].onend();assert.equal(t.session.phase,'idle');assert.equal(t.requests.length,0);
+test('permission failure pauses, silence recovers, and 429 stops without API retries',async()=>{
+ const t=setup();t.session.start();t.recognizers[0].onerror({error:'not-allowed'});assert.equal(t.session.phase,'mic-paused');assert.match(t.errors.at(-1),/許可/);
+ t.session.start();t.recognizers[1].onend();await flush();assert.equal(t.session.phase,'listening');assert.equal(t.requests.length,0);t.session.stop();
  const u=setup({request:async()=>{throw Error('利用上限です。')}});u.session.start();u.result(u.recognizers[0]);u.recognizers[0].onend();await flush();assert.equal(u.session.phase,'idle');assert.equal(u.recognizers.length,1);assert.equal(u.errors.at(-1),'利用上限です。');
 });
 test('a previous session cannot resume into a new session',async()=>{
  let end;const t=setup({speak:()=>new Promise(r=>end=r)});t.session.start();t.result(t.recognizers[0]);t.recognizers[0].onend();await flush();
  t.session.stop();t.session.start();end();await flush();assert.equal(t.recognizers.length,2);assert.equal(t.session.phase,'listening');t.session.stop();
+});
+
+test('releases the old capture with abort before speaking, then creates a fresh recognizer',async()=>{
+ let t;t=setup({speak:async()=>assert.equal(t.recognizers[0].aborted,true)});
+ t.session.start();t.result(t.recognizers[0]);t.recognizers[0].onend();await flush();
+ assert.equal(t.recognizers.length,2);assert.notEqual(t.recognizers[0],t.recognizers[1]);t.session.stop();
+});
+test('start must be acknowledged before displaying listening; retries a missing start',async(context)=>{
+ context.mock.timers.enable({apis:['setTimeout']});
+ const recs=[];const t=setup({createRecognition:()=>{const rec={start(){},stop(){},abort(){}};recs.push(rec);return rec}});
+ t.session.start();assert.equal(t.session.phase,'starting');
+ context.mock.timers.tick(8000);await flush();assert.equal(recs.length,2);
+ recs[1].onstart();assert.equal(t.session.phase,'listening');t.session.stop();
+});
+test('silent capture after playback retries twice then offers manual recovery without API calls',async(context)=>{
+ context.mock.timers.enable({apis:['setTimeout']});
+ const t=setup();t.session.start();
+ for(let i=0;i<3;i++){context.mock.timers.tick(25000);await flush();}
+ assert.equal(t.session.phase,'mic-paused');assert.equal(t.recognizers.length,3);assert.equal(t.requests.length,0);
+ t.session.restartMicrophone();assert.equal(t.session.phase,'listening');assert.equal(t.recognizers.length,4);t.session.stop();
+});
+test('manual microphone recovery ignores callbacks from the old recognizer',async()=>{
+ const t=setup();t.session.start();const old=t.recognizers[0],end=old.onend;
+ t.session.restartMicrophone();end();await flush();assert.equal(t.recognizers.length,2);assert.equal(t.requests.length,0);t.session.stop();
+});
+test('stop during recovery delay never restarts the microphone',async()=>{
+ let release;const t=setup({wait:()=>new Promise(resolve=>release=resolve)});
+ t.session.start();t.recognizers[0].onend();assert.equal(t.session.phase,'recovering');
+ t.session.stop();release();await flush();assert.equal(t.recognizers.length,1);assert.equal(t.session.phase,'idle');
 });

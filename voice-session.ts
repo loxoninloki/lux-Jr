@@ -1,6 +1,7 @@
-export type VoicePhase = 'idle' | 'listening' | 'waiting' | 'speaking' | 'paused';
+export type VoicePhase = 'idle' | 'starting' | 'listening' | 'recovering' | 'mic-paused' | 'waiting' | 'speaking' | 'paused';
 export type Recognition = {
   lang: string; continuous: boolean; interimResults: boolean;
+  onstart: null | (() => void);
   onresult: null | ((event: any) => void); onend: null | (() => void);
   onerror: null | ((event: { error: string }) => void);
   start(): void; stop(): void; abort(): void;
@@ -13,32 +14,57 @@ type Ports = {
   phase(value: VoicePhase): void;
   transcript(text: string): void;
   error(text: string): void;
-  wait?: () => Promise<void>;
+  wait?: (milliseconds: number) => Promise<void>;
 };
-/** One session owns microphone, request and playback. Old callbacks cannot revive it. */
+/** Each capture is disposable: fully release it before TTS, and verify restart. */
 export class VoiceSession {
   phase: VoicePhase = 'idle';
   private epoch = 0;
   private aborter: AbortController | null = null;
   private rec: Recognition | null = null;
   private pending = '';
+  private retries = 0;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private ports: Ports;
   constructor(ports: Ports) { this.ports = ports; }
   private set(phase: VoicePhase) { this.phase = phase; this.ports.phase(phase); }
   private current(epoch: number) { return this.epoch === epoch && !!this.aborter && !this.aborter.signal.aborted; }
+  private wait(ms: number) { return this.ports.wait?.(ms) ?? new Promise<void>(resolve => setTimeout(resolve, ms)); }
+  private release() {
+    clearTimeout(this.watchdog);
+    const rec = this.rec; this.rec = null;
+    if (rec) {
+      rec.onstart = rec.onend = rec.onresult = rec.onerror = null;
+      // stop/end alone may leave Safari's capture session attached across TTS.
+      try { rec.abort(); } catch {}
+    }
+  }
   start() {
-    this.stop(); this.ports.error(''); this.aborter = new AbortController();
+    this.stop(); this.retries = 0; this.ports.error(''); this.aborter = new AbortController();
     this.listen(this.epoch);
   }
   stop() {
-    ++this.epoch; clearTimeout(this.watchdog);
+    ++this.epoch; this.release();
     this.aborter?.abort(); this.aborter = null;
-    const rec = this.rec; this.rec = null;
-    if (rec) { rec.onend = rec.onresult = rec.onerror = null; try { rec.abort(); } catch {} }
     this.pending = ''; this.ports.cancelSpeech(); this.set('idle');
   }
   private fail(text: string) { this.stop(); this.ports.error(text); }
+  private pauseMic(text: string) {
+    this.release(); this.set('mic-paused'); this.ports.error(text);
+  }
+  private recover(epoch: number) {
+    if (!this.current(epoch)) return;
+    this.release();
+    if (++this.retries > 2) { this.pauseMic('マイクの自動再開を確認できません。「マイクを再開」を押してください。'); return; }
+    this.set('recovering');
+    void this.wait(1200 * this.retries).then(() => { if (this.current(epoch)) this.listen(epoch); });
+  }
+  restartMicrophone() {
+    if (!this.aborter || !['starting','listening','recovering','mic-paused'].includes(this.phase)) return;
+    ++this.epoch; this.release(); this.retries = 0; this.ports.error('');
+    // A user gesture provides a recovery route where Safari denies automatic start.
+    this.listen(this.epoch);
+  }
   private listen(epoch: number) {
     if (!this.current(epoch)) return;
     let rec: Recognition;
@@ -48,47 +74,54 @@ export class VoiceSession {
     const valid = () => this.current(epoch) && this.rec === rec && !ended;
     const close = () => {
       if (!valid() || closing) return; closing = true;
-      try { rec.stop(); } catch { this.fail('聞き取りを停止できませんでした。音声会話を再開してください。'); return; }
-      // Never send until the recognizer confirms that the microphone has stopped.
       clearTimeout(this.watchdog);
-      this.watchdog = setTimeout(() => { if (valid()) this.fail('マイクの停止を確認できません。もう一度開始してください。'); }, 4000);
+      this.watchdog = setTimeout(() => { if (valid()) this.recover(epoch); }, 4000);
+      try { rec.stop(); } catch { this.recover(epoch); }
+    };
+    rec.onstart = () => {
+      if (!valid() || closing) return;
+      this.set('listening'); clearTimeout(this.watchdog);
+      // Safari can fire start but never deliver a result/error/end after TTS.
+      // Silence cannot be distinguished from that failure; retry capture only, never API.
+      this.watchdog = setTimeout(() => { if (valid()) this.recover(epoch); }, 25000);
     };
     rec.onresult = event => {
       if (!valid() || closing) return;
-      let interim = '';
+      this.retries = 0; let interim = '';
       for (let i = 0; i < event.results.length; i++) {
         const result = event.results[i];
         if (result.isFinal) finals.set(i, result[0].transcript);
         else interim += result[0].transcript;
       }
       this.ports.transcript([...finals.values()].join('') + interim);
+      clearTimeout(this.watchdog); this.watchdog = setTimeout(close, 60000);
       if (finals.size) close();
     };
     rec.onerror = event => {
       if (!valid()) return;
-      this.fail(event.error === 'not-allowed' || event.error === 'service-not-allowed'
-        ? 'マイクが許可されていません。Safariで許可し、音声会話を開始してください。'
-        : event.error === 'no-speech' ? '声が聞こえなかったため終了しました。開始ボタンで再開できます。'
-        : '音声認識が中断されました。通信とマイクを確認し、開始ボタンで再開してください。');
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        this.pauseMic('マイクを再開できませんでした。Safariのマイク許可を確認し、「マイクを再開」を押してください。');
+      } else if (['no-speech','aborted','network','audio-capture'].includes(event.error)) this.recover(epoch);
+      else this.pauseMic('聞き取りが中断されました。「マイクを再開」を押してください。');
     };
     rec.onend = () => {
-      if (!valid()) return; ended = true; clearTimeout(this.watchdog); this.rec = null;
+      if (!valid()) return; ended = true;
       const text = [...finals.values()].join('').trim();
-      if (!text) { this.fail('聞き取りが終了しました。開始ボタンで再開できます。'); return; }
+      this.release();
+      if (!text) { this.recover(epoch); return; }
       if (text.length > 4000) { this.fail('一度のお話が長すぎました。短く区切ってお話しください。'); return; }
       void this.respond(text, epoch);
     };
-    this.set('listening'); this.ports.transcript('');
-    this.watchdog = setTimeout(close, 60000);
-    try { rec.start(); } catch { this.fail('マイクを開始できませんでした。ほかの音声入力を停止して再開してください。'); }
+    this.set('starting'); this.ports.transcript('');
+    this.watchdog = setTimeout(() => { if (valid()) this.recover(epoch); }, 8000);
+    try { rec.start(); } catch { this.recover(epoch); }
   }
   private async respond(text: string, epoch: number) {
     this.set('waiting');
     try {
       const reply = await this.ports.request(text, this.aborter!.signal);
       if (!this.current(epoch)) return;
-      this.pending = reply;
-      await this.play(epoch);
+      this.pending = reply; await this.play(epoch);
     } catch (error) {
       if (this.current(epoch)) this.fail(error instanceof Error ? error.message : '通信できませんでした。音声会話を終了しました。');
     }
@@ -102,8 +135,8 @@ export class VoiceSession {
       return;
     }
     if (!this.current(epoch)) return;
-    this.pending = '';
-    await (this.ports.wait?.() ?? new Promise(resolve => setTimeout(resolve, 650)));
+    this.pending = ''; this.ports.cancelSpeech(); this.set('recovering');
+    await this.wait(1200);
     if (this.current(epoch)) this.listen(epoch);
   }
   resume() {
