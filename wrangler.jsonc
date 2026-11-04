@@ -1,0 +1,10 @@
+{
+  "name": "lux-next-api",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "vars": { "ALLOWED_ORIGIN": "https://loxoninloki.github.io", "MONTHLY_BUDGET_YEN": "1000", "USD_JPY": "150" },
+  "durable_objects": { "bindings": [{ "name": "BUDGET", "class_name": "BudgetLedger" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BudgetLedger"] }]
+}

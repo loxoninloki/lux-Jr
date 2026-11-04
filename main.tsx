@@ -1,0 +1,194 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import './style.css';
+
+type Message = { id: string; role: 'user' | 'assistant'; text: string; at: number };
+type Memory = { id: string; text: string; at: number };
+type Reminder = { id: string; title: string; due: number; repeat: 'none' | 'daily' | 'weekly'; done: boolean };
+type Settings = { endpoint: string; voice: boolean; voiceName: string; model: string };
+type Usage = { month: string; requests: number; inputTokens: number; outputTokens: number; estimatedYen: number; reservedYen: number; budgetYen: number };
+type Data = { messages: Message[]; memories: Memory[]; reminders: Reminder[]; notices: string[]; settings: Settings };
+const KEY = 'lux-next:data:v1';
+const fresh = (): Data => ({ messages: [], memories: [], reminders: [], notices: [], settings: { endpoint: '', voice: false, voiceName: '', model: 'gemini-3.5-flash-lite' } });
+function load(): Data {
+  try { const s = JSON.parse(localStorage.getItem(KEY) || 'null'); if (!s) return fresh();
+    if (!Array.isArray(s.messages) || !Array.isArray(s.memories) || !Array.isArray(s.reminders)) throw Error();
+    return { ...fresh(), ...s, settings: { ...fresh().settings, ...s.settings } };
+  } catch { return fresh(); }
+}
+const uuid = () => crypto.randomUUID();
+const initial = load();
+const dateLabel = (at: number) => new Date(at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+const yen = (v: number) => `¥${v.toFixed(2)}`;
+function Icon({ name, size = 20 }: { name: string; size?: number }) {
+  const paths: Record<string, React.ReactNode> = {
+    chat: <><path d="M21 11a8 8 0 0 1-8 8H7l-4 3V11a9 9 0 0 1 18 0Z"/><path d="M8 10h8M8 14h5"/></>,
+    memory: <><path d="M9 3H5v18h14V3h-4M9 3v5l3-2 3 2V3H9Z"/><path d="M8 12h8M8 16h5"/></>,
+    clock: <><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></>,
+    settings: <><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></>,
+    mic: <><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></>,
+    send: <><path d="m4 12 16-8-6 17-3-7-7-2Z"/><path d="m11 14 9-10"/></>,
+    plus: <path d="M12 5v14M5 12h14"/>,
+    arrow: <path d="m8 5 7 7-7 7"/>,
+    stop: <rect x="5" y="5" width="14" height="14" rx="3"/>,
+    spark: <><path d="m12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3Z"/><path d="m20 2 .5 1.5L22 4l-1.5.5L20 6l-.5-1.5L18 4l1.5-.5Z"/></>,
+    sound: <><path d="m4 9 5 0 5-5v16l-5-5H4Z"/><path d="M18 8q5 4 0 8"/></>,
+    lock: <><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></>,
+  };
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] || paths.spark}</svg>;
+}
+
+function App() {
+  const [data, setData] = useState<Data>(initial);
+  const [page, setPage] = useState('chat');
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [toast, setToast] = useState('');
+  const [token, setToken] = useState('');
+  const [connected, setConnected] = useState(false);
+  const [usage, setUsage] = useState<Usage | null>(null);
+  const [memoryInput, setMemoryInput] = useState('');
+  const [query, setQuery] = useState('');
+  const [editingMemory, setEditingMemory] = useState<string | null>(null);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [speaking, setSpeaking] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const [timerMinutes, setTimerMinutes] = useState('10');
+  const [title, setTitle] = useState('');
+  const [due, setDue] = useState('');
+  const [repeat, setRepeat] = useState<Reminder['repeat']>('none');
+  const [editingReminder, setEditingReminder] = useState<string | null>(null);
+  const bottom = useRef<HTMLDivElement>(null);
+  const controller = useRef<AbortController | null>(null);
+  const recognition = useRef<any>(null);
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const settings = data.settings;
+  const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 4500); };
+  const patchSettings = (patch: Partial<Settings>) => { setData(d => ({ ...d, settings: { ...d.settings, ...patch } })); setConnected(false); };
+  useEffect(() => {
+    try { localStorage.setItem(KEY, JSON.stringify(data)); }
+    catch { setError('端末への保存ができません。容量やSafariの設定をご確認ください。'); }
+  }, [data]);
+  useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [data.messages, busy, page]);
+  useEffect(() => {
+    if (!('speechSynthesis' in window)) return;
+    const refresh = () => setVoices(speechSynthesis.getVoices().filter(v => v.lang.startsWith('ja')));
+    refresh(); speechSynthesis.addEventListener('voiceschanged', refresh);
+    return () => { speechSynthesis.removeEventListener('voiceschanged', refresh); speechSynthesis.cancel(); recognition.current?.stop(); };
+  }, []);
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const time = Date.now(); setNow(time);
+      const ready = dataRef.current.reminders.filter(r => !r.done && r.due <= time);
+      if (!ready.length) return;
+      const ids = new Set(ready.map(r => r.id));
+      setData(d => ({ ...d, reminders: d.reminders.map(r => {
+        if (!ids.has(r.id)) return r;
+        if (r.repeat === 'none') return { ...r, done: true };
+        let next = new Date(r.due);
+        do { next.setDate(next.getDate() + (r.repeat === 'daily' ? 1 : 7)); } while (+next <= time);
+        return { ...r, due: +next };
+      }), notices: [...ready.map(r => `${new Date(time).toLocaleString('ja-JP')}｜${r.title}`), ...d.notices].slice(0, 50) }));
+      notify(`お時間です、ロキ様。${ready.map(r => r.title).join('、')}`);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+  function speak(text: string) {
+    if (!('speechSynthesis' in window)) { notify('このブラウザでは読み上げを利用できません。'); return; }
+    speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP'; u.rate = 0.9;
+    const voice = voices.find(v => v.name === settings.voiceName); if (voice) u.voice = voice;
+    u.onstart = () => setSpeaking(true); u.onend = u.onerror = () => setSpeaking(false);
+    speechSynthesis.speak(u);
+  }
+  function mic() {
+    if (listening) { recognition.current?.stop(); setListening(false); return; }
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) { notify('音声認識が使えません。iPhoneキーボードのマイク入力も利用できます。'); return; }
+    speechSynthesis?.cancel(); setSpeaking(false);
+    const rec = new SpeechRecognition(); rec.lang = 'ja-JP'; rec.interimResults = false; rec.continuous = false;
+    rec.onresult = (e: any) => { setInput(p => `${p}${e.results[0][0].transcript}`); };
+    rec.onerror = (e: any) => { setListening(false); setError(e.error === 'not-allowed' ? 'マイクの許可が必要です。Safariのサイト設定をご確認ください。' : '音声を認識できませんでした。もう一度お試しください。'); };
+    rec.onend = () => setListening(false); recognition.current = rec;
+    try { rec.start(); setListening(true); } catch { setError('マイクを開始できませんでした。'); }
+  }
+  function endpointUrl(path: string) {
+    const url = new URL(settings.endpoint);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw Error('接続先にはHTTPSのWorker URLを入力してください。');
+    return `${url.origin}${url.pathname.replace(/\/$/, '')}/${path}`;
+  }
+  async function connect() {
+    setError(''); setBusy(true); setConnected(false);
+    try {
+      const response = await fetch(endpointUrl('status'), { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) });
+      const result = await response.json(); if (!response.ok) throw Error(result.error || '接続を確認できません。');
+      setUsage(result.usage); setConnected(true); notify('LUXのサーバーに接続しました。');
+    } catch (e) { setError(e instanceof Error && e.name === 'TimeoutError' ? '接続確認がタイムアウトしました。' : e instanceof Error ? e.message : '接続できません。'); }
+    finally { setBusy(false); }
+  }
+  async function send(text = input) {
+    text = text.trim(); if (!text || busy) return;
+    setError('');
+    if (!settings.endpoint || !token) { setError('AIはまだ接続されていません。「設定」でサーバーURLとアクセスコードを設定してください。'); return; }
+    const user: Message = { id: uuid(), role: 'user', text, at: Date.now() };
+    const history = [...data.messages, user].slice(-16);
+    setData(d => ({ ...d, messages: [...d.messages, user] })); setInput(''); setBusy(true);
+    controller.current = new AbortController(); const timeout = window.setTimeout(() => controller.current?.abort(), 75000);
+    try {
+      const response = await fetch(endpointUrl('chat'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, signal: controller.current.signal,
+        body: JSON.stringify({ messages: history.map(({ role, text }) => ({ role, text })), memories: data.memories.map(m => m.text), model: settings.model }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw Error(result.error || (response.status === 429 ? '利用上限です。時間を置いてお試しください。' : '応答を取得できませんでした。'));
+      if (typeof result.text !== 'string' || !result.text.trim()) throw Error('回答が空でした。もう一度お試しください。');
+      setData(d => ({ ...d, messages: [...d.messages, { id: uuid(), role: 'assistant', text: result.text, at: Date.now() }] }));
+      setUsage(result.usage); setConnected(true); if (settings.voice) speak(result.text);
+    } catch (e) {
+      setError(e instanceof Error && e.name === 'AbortError' ? '応答待ちを終了しました。履歴には入力内容が残っています。' : e instanceof Error ? e.message : '通信できませんでした。');
+      setConnected(false);
+    } finally { clearTimeout(timeout); setBusy(false); controller.current = null; }
+  }
+  function saveMemory() {
+    const text = memoryInput.trim(); if (!text) return;
+    if (text.length > 500 || data.memories.length >= 30 && !editingMemory) { notify('記憶は1件500文字、30件までです。'); return; }
+    setData(d => ({ ...d, memories: editingMemory ? d.memories.map(m => m.id === editingMemory ? { ...m, text } : m) : [...d.memories, { id: uuid(), text, at: Date.now() }] }));
+    setMemoryInput(''); setEditingMemory(null); notify('ロキ様が指定した内容を記憶しました。');
+  }
+  function addReminder() {
+    const time = new Date(due).getTime(); if (!title.trim() || !Number.isFinite(time) || time <= Date.now()) { notify('予定名と未来の時刻を入力してください。'); return; }
+    setData(d => ({ ...d, reminders: editingReminder ? d.reminders.map(r => r.id === editingReminder ? { ...r, title: title.trim(), due: time, repeat, done: false } : r) : [...d.reminders, { id: uuid(), title: title.trim(), due: time, repeat, done: false }] }));
+    setTitle(''); setDue(''); setEditingReminder(null); notify('予定を登録しました。この画面を開いている間にお知らせします。');
+  }
+  function exportData() {
+    const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), ...data }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `lux-backup-${new Date().toISOString().slice(0,10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+  const nav = [{ id: 'chat', icon: 'chat', name: '会話' }, { id: 'memory', icon: 'memory', name: '記憶' }, { id: 'reminder', icon: 'clock', name: '予定' }, { id: 'settings', icon: 'settings', name: '設定' }];
+  return <div className="app-shell">
+    <aside className="sidebar"><a className="brand" href="./" aria-label="LUX ホーム"><span className="brand-mark">✧</span><span>LUX<span className="brand-caption">PERSONAL COMPANION</span></span></a><div className="side-label">YOUR SPACE</div><nav aria-label="メインメニュー">{nav.map(n => <button key={n.id} className={page === n.id ? 'nav-item active' : 'nav-item'} onClick={() => setPage(n.id)} aria-current={page === n.id ? 'page' : undefined}><Icon name={n.icon}/><span>{n.name}</span>{n.id === 'memory' && <small>{data.memories.length.toString().padStart(2,'0')}</small>}</button>)}</nav><div className="side-bottom"><div className="mini-orb"/><div><strong>ロキ様のLUX</strong><p>あなたと、少しずつ。</p></div><span className="little-dot"/></div></aside>
+    <div className="workspace"><header className="topbar"><div className="mobile-brand">✧ LUX</div><div className="breadcrumb">MY COMPANION <span>/</span> {nav.find(n => n.id === page)?.name}</div><div className="status-chip"><span className={connected ? 'little-dot online' : 'little-dot'}/>{connected ? 'AI 接続済み' : 'AI 未接続'}</div><button className="icon-button top-settings" onClick={() => setPage('settings')} aria-label="設定を開く"><Icon name="settings"/></button></header>
+    <main className={`main-content ${page === 'chat' ? 'chat-page' : ''}`}>
+    {page === 'chat' && <>
+      <section className={data.messages.length ? 'companion-hero compact' : 'companion-hero'} aria-label="LUXの状態"><div className="hero-eyebrow"><span/> ALWAYS BY YOUR SIDE</div><div className={`orb-scene ${busy ? 'thinking' : ''} ${speaking ? 'speaking' : ''} ${listening ? 'listening' : ''}`}><div className="orb-halo halo-one"/><div className="orb-halo halo-two"/><div className="orb-ring ring-one"/><div className="orb-ring ring-two"/><div className="orb"><div className="orb-core"/><span className="orb-symbol">✧</span></div><span className="star star-one">✦</span><span className="star star-two">✧</span><span className="orb-ground"/></div><div className="hero-copy"><p className="hero-kicker">YOUR PERSONAL AI COMPANION</p><h1>{listening ? 'お話を聞いています。' : speaking ? 'ロキ様へ、お伝えします。' : busy ? '少し、お待ちください。' : 'おかえりなさい、ロキ様。'}</h1><p>今日も、あなたのそばに。<br className="mobile-break"/> どんなことから始めましょうか。</p></div></section>
+      {!data.messages.length && <section className="suggestions" aria-label="会話のきっかけ"><button onClick={() => setInput('今日の気持ちを聞いてほしいです。')}><Icon name="spark"/><span><strong>少し、話しませんか</strong><small>今日の気持ちを、ゆっくりと</small></span><Icon name="arrow" size={16}/></button><button onClick={() => setPage('memory')}><Icon name="memory"/><span><strong>私に覚えてほしいこと</strong><small>大切なことを、一つずつ</small></span><Icon name="arrow" size={16}/></button><button onClick={() => setPage('reminder')}><Icon name="clock"/><span><strong>日常を、整える</strong><small>予定やタイマーを確認する</small></span><Icon name="arrow" size={16}/></button></section>}
+      <section className="conversation" aria-label="会話履歴" aria-live="polite">{data.messages.map(m => <article key={m.id} className={`message ${m.role}`}><div className="message-avatar">{m.role === 'assistant' ? '✧' : 'R'}</div><div className="message-body"><div className="message-meta">{m.role === 'assistant' ? 'LUX' : 'ロキ様'}<time>{dateLabel(m.at)}</time></div><p>{m.text}</p>{m.role === 'assistant' && <button className="text-button" onClick={() => speak(m.text)}><Icon name="sound" size={14}/> 読み上げ</button>}</div></article>)}{busy && <div className="thinking-label"><span className="pulse-dots">•••</span> LUXが応答を準備しています</div>}<div ref={bottom}/></section>
+      <div className="composer-area">{error && <div className="error" role="alert">{error}<button className="text-button" onClick={() => setPage('settings')}>設定を開く</button><button className="text-button" onClick={() => setError('')}>閉じる</button></div>}{!settings.endpoint && <div className="connection-note"><Icon name="lock" size={13}/> 安全なAI接続の準備中です <button onClick={() => setPage('settings')}>接続設定 <span>↗</span></button></div>}<form className="composer" onSubmit={e => { e.preventDefault(); void send(); }}><textarea aria-label="LUXへのメッセージ" placeholder="ルクス、少し話そう。" value={input} maxLength={4000} rows={1} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); } }}/><div className="composer-actions"><span className="input-hint">あなたのペースで、お話しください。</span><button type="button" className={`icon-button ${listening ? 'recording' : ''}`} onClick={mic} aria-label={listening ? '音声入力を停止' : '音声入力'}><Icon name={listening ? 'stop' : 'mic'}/></button>{speaking && <button type="button" className="icon-button" onClick={() => { speechSynthesis.cancel(); setSpeaking(false); }} aria-label="読み上げを停止"><Icon name="stop"/></button>}<button type={busy ? 'button' : 'submit'} className="send-button" disabled={!busy && !input.trim()} onClick={busy ? () => controller.current?.abort() : undefined} aria-label={busy ? '応答待ちを停止' : '送信'}><Icon name={busy ? 'stop' : 'send'} size={19}/></button></div></form><p className="privacy-foot"><span className="little-dot"/> 会話はこの端末に保存 <span className="separator">·</span> LUX NEXT <span className="version">v0.1</span></p></div>
+    </>}
+    {page === 'memory' && <section className="panel-page"><div className="page-eyebrow">MEMORY</div><h1>あなたを、少しずつ知る。</h1><p className="page-description">覚えておきたいことを、ロキ様自身で選べます。会話履歴とは別に、この端末へ保存します。</p><div className="info-note"><Icon name="lock"/> 自動では記憶しません。AIに話すときは、登録した記憶が会話の文脈として送られます。</div><div className="card"><h2>{editingMemory ? '記憶を編集' : '新しい記憶'}</h2><label>覚えてほしいこと<textarea value={memoryInput} onChange={e => setMemoryInput(e.target.value)} maxLength={500} placeholder="例：落ち着いた丁寧な話し方が好きです。"/></label><button className="primary" onClick={saveMemory}><Icon name="plus" size={16}/>{editingMemory ? '変更を保存' : 'この内容を記憶する'}</button>{editingMemory && <button className="text-button" onClick={() => { setEditingMemory(null); setMemoryInput(''); }}>キャンセル</button>}</div><label className="search-label">記憶を検索<input placeholder="キーワードを入力" value={query} onChange={e => setQuery(e.target.value)}/></label><div className="section-title"><h2>大切な記憶</h2><span>{data.memories.length} / 30</span></div>{data.memories.filter(m => m.text.includes(query)).map(m => <article className="card memory-card" key={m.id}><Icon name="memory"/><div><p>{m.text}</p><small>{new Date(m.at).toLocaleDateString('ja-JP')}</small><div className="row-actions"><button onClick={() => { setEditingMemory(m.id); setMemoryInput(m.text); }}>編集</button><button onClick={() => { if (confirm('この記憶を削除しますか？')) setData(d => ({ ...d, memories: d.memories.filter(x => x.id !== m.id) })); }}>削除</button></div></div></article>)}{!data.memories.length && <div className="empty-state"><Icon name="memory" size={32}/><h3>記憶は、ここから。</h3><p>あなたが覚えてほしいと思ったことだけを。</p></div>}</section>}
+    {page === 'reminder' && <section className="panel-page"><div className="page-eyebrow">DAILY SUPPORT</div><h1>日常に、小さな余白を。</h1><p className="page-description">予定と時間の管理を、ひとつの場所に。</p><div className="info-note">この段階では、アプリを開いている間のお知らせです。画面を閉じている間の通知・音声からの自動登録は未接続です。</div><div className="card"><h2>タイマー</h2><div className="inline-form"><input type="number" min="1" max="1440" aria-label="タイマーの分数" value={timerMinutes} onChange={e => setTimerMinutes(e.target.value)}/><span>分</span><button className="primary" onClick={() => { const minutes = Number(timerMinutes); if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) return notify('1〜1440分で指定してください。'); setData(d => ({ ...d, reminders: [...d.reminders, { id: uuid(), title: `${minutes}分タイマー`, due: Date.now() + minutes*60000, done: false, repeat: 'none' }] })); notify('タイマーを開始しました。'); }}>開始</button></div></div><div className="card"><h2>{editingReminder ? '予定を編集' : '予定を追加'}</h2><label>予定名<input value={title} maxLength={100} onChange={e => setTitle(e.target.value)} placeholder="例：病院の予定"/></label><label>日時<input type="datetime-local" value={due} onChange={e => setDue(e.target.value)}/></label><label>繰り返し<select value={repeat} onChange={e => setRepeat(e.target.value as Reminder['repeat'])}><option value="none">繰り返しなし</option><option value="daily">毎日</option><option value="weekly">毎週（同じ曜日）</option></select></label><button className="primary" onClick={addReminder}>{editingReminder ? '変更を保存' : '予定を登録'}</button></div><h2>予定一覧</h2>{data.reminders.filter(r => !r.done).sort((a,b) => a.due-b.due).map(r => <div className="card" key={r.id}><h3>{r.title}</h3><p>{new Date(r.due).toLocaleString('ja-JP')} {r.repeat === 'daily' ? '・毎日' : r.repeat === 'weekly' ? '・毎週' : ''}</p><small>あと {Math.max(0,Math.ceil((r.due-now)/60000))} 分</small><div className="row-actions"><button onClick={() => { setEditingReminder(r.id); setTitle(r.title); const t = new Date(r.due); setDue(new Date(+t-t.getTimezoneOffset()*60000).toISOString().slice(0,16)); setRepeat(r.repeat); }}>編集</button><button onClick={() => setData(d => ({ ...d, reminders: d.reminders.filter(x => x.id !== r.id) }))}>削除</button></div></div>)}{!data.reminders.some(r=>!r.done) && <p className="muted">次の予定は、まだありません。</p>}<h2>お知らせの履歴</h2>{data.notices.map((n,i) => <p className="notice-row" key={i}>{n}</p>)}{!data.notices.length && <p className="muted">お知らせはまだありません。</p>}</section>}
+    {page === 'settings' && <section className="panel-page"><div className="page-eyebrow">SETTINGS</div><h1>あなたに合う、ルクスへ。</h1><p className="page-description">接続、声、そして大切なデータを管理します。</p>{error && <div className="error" role="alert">{error}</div>}<div className="card"><div className="section-title"><h2>AIとの接続</h2><span className="tag">{connected ? '接続済み' : '未接続'}</span></div><p className="muted">GeminiのAPIキーはサーバー側だけに保存します。この画面にAPIキーを入力しないでください。</p><label>バックエンドURL<input type="url" value={settings.endpoint} onChange={e => patchSettings({ endpoint: e.target.value.trim() })} placeholder="https://lux-next-api.example.workers.dev" autoCapitalize="none" spellCheck={false}/></label><label>専用アクセスコード<input type="password" value={token} onChange={e => { setToken(e.target.value); setConnected(false); }} placeholder="サーバーに設定した専用コード" autoComplete="off"/></label><small>アクセスコードはメモリ上のみ保持し、ページを閉じると消えます。</small><label>モデル<select value={settings.model} onChange={e => patchSettings({ model: e.target.value })}><option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option></select></label><button className="primary" disabled={busy || !token || !settings.endpoint} onClick={() => void connect()}>接続を確認</button></div><div className="card"><h2>音声</h2><label className="switch-row">回答を自動で読み上げる<input type="checkbox" checked={settings.voice} onChange={e => patchSettings({ voice: e.target.checked })}/></label><label>日本語の声<select value={settings.voiceName} onChange={e => patchSettings({ voiceName: e.target.value })}><option value="">端末の標準音声</option>{voices.map(v => <option key={v.voiceURI} value={v.name}>{v.name}</option>)}</select></label><p className="muted">声は端末により異なります。自動再生が制限される場合は、回答の「読み上げ」を押してください。iPhone実機での検証は未完了です。</p><div className="row-actions"><button onClick={() => speak('おかえりなさい、ロキ様。私がそばにいます。')}>声を試す</button><button onClick={() => { speechSynthesis?.cancel(); setSpeaking(false); }}>停止</button></div></div><div className="card"><h2>今月の利用量</h2>{usage ? <><div className="budget-amount">{yen(usage.estimatedYen)} <small>/ ¥{usage.budgetYen}</small></div><p>{usage.month} ・ {usage.requests} 回 ・ 入力 {usage.inputTokens} / 出力 {usage.outputTokens} トークン</p><p className="muted">安全側の予約額 {yen(usage.reservedYen)}。予算判定はサーバーが行います。円換算は設定レートによる概算で、実際の請求額とは異なります。</p></> : <p className="muted">サーバー接続後に表示します。予算の初期値は月1,000円です。現在はAIリクエストを送信していません。</p>}</div><div className="card"><h2>ホーム画面に追加</h2><p>iPhoneのSafariでこのページを開き、共有ボタン →「ホーム画面に追加」を選んでください。</p><p className="muted">初回はオンラインで開いてください。オフラインでは保存済みの記憶や会話を閲覧できます。AIとの通信にはインターネット接続が必要です。</p></div><div className="card"><h2>データとプライバシー</h2><p className="muted">会話と記憶は、このブラウザ内に保存します。暗号化された保管庫ではありません。共有端末での利用は避けてください。AI送信時には直近16件の会話と登録した記憶をサーバー経由でGeminiへ送ります。無料API枠では入力がサービス改善に使われる場合があります。クラウド同期・暗号化・自動記憶は未実装です。</p><div className="row-actions"><button onClick={exportData}>データをエクスポート</button><button onClick={() => { if (confirm('会話履歴をすべて削除しますか？記憶は残ります。')) setData(d => ({ ...d, messages: [] })); }}>会話を消去</button><button className="danger" onClick={() => { if (confirm('この端末のLUXデータをすべて初期化します。エクスポートはお済みですか？')) { controller.current?.abort(); recognition.current?.stop(); speechSynthesis?.cancel(); setData(fresh()); setToken(''); setConnected(false); setUsage(null); notify('データを初期化しました。'); } }}>すべて初期化</button></div></div><p className="footer-note">LUX NEXT · v0.1 · あなたと育つ、静かな光。<br/>AI接続はサーバー設定待ち。閉じた状態の通知は未実装です。</p></section>}
+    </main><nav className="mobile-nav" aria-label="下部メニュー">{nav.map(n => <button className={page === n.id ? 'active' : ''} key={n.id} onClick={() => setPage(n.id)} aria-label={n.name}><Icon name={n.icon}/><span>{n.name}</span></button>)}</nav></div>{toast && <div className="toast" role="status">{toast}</div>}
+  </div>;
+}
+
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() { return this.state.failed ? <main className="panel-page"><h1>画面を開けませんでした。</h1><p>保存データを保ったまま、ページを再読み込みしてください。</p><button className="primary" onClick={() => location.reload()}>再読み込み</button></main> : this.props.children; }
+}
+createRoot(document.getElementById('root')!).render(<ErrorBoundary><App/></ErrorBoundary>);
+if ('serviceWorker' in navigator) window.addEventListener('load', () => { void navigator.serviceWorker.register(`${import.meta.url.includes('/assets/') ? '/lux-next/' : './'}sw.js`, { scope: '/lux-next/' }).catch(() => {}); });
