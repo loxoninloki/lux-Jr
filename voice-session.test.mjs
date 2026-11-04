@@ -75,3 +75,20 @@ test('stop during recovery delay never restarts the microphone',async()=>{
  t.session.start();t.recognizers[0].onend();assert.equal(t.session.phase,'recovering');
  t.session.stop();release();await flush();assert.equal(t.recognizers.length,1);assert.equal(t.session.phase,'idle');
 });
+
+test('final transcript survives missing end event and is submitted once',async(context)=>{
+ context.mock.timers.enable({apis:['setTimeout']});const t=setup();t.session.start();const rec=t.recognizers[0],lateEnd=rec.onend;
+ t.result(rec);context.mock.timers.tick(4000);await flush();assert.equal(t.requests.length,1);assert.equal(t.requests[0].text,'こんにちは');assert.equal(rec.aborted,true);
+ lateEnd();await flush();assert.equal(t.requests.length,1);t.session.stop();
+});
+test('manual finish submits interim text only when explicitly requested',async()=>{
+ const t=setup();t.session.start();const rec=t.recognizers[0];
+ rec.onresult({results:[Object.assign([{transcript:'まだ確定していない言葉'}],{isFinal:false})]});assert.equal(t.requests.length,0);
+ t.session.finishSpeaking();rec.onend();await flush();assert.equal(t.requests.length,1);assert.equal(t.requests[0].text,'まだ確定していない言葉');t.session.stop();
+});
+test('recognizer aborted error after a final result does not discard the utterance',async()=>{
+ const t=setup();t.session.start();const rec=t.recognizers[0];t.result(rec);rec.onerror({error:'aborted'});await flush();assert.equal(t.requests.length,1);t.session.stop();
+});
+test('stop while finishing prevents delayed submission',async(context)=>{
+ context.mock.timers.enable({apis:['setTimeout']});const t=setup();t.session.start();t.result(t.recognizers[0]);t.session.stop();context.mock.timers.tick(8000);await flush();assert.equal(t.requests.length,0);
+});
