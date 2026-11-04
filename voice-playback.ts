@@ -9,7 +9,7 @@ export function playSpeech(text: string, voiceName: string, signal: AbortSignal,
     let finished = false; let started = false;
     const finish = (error?: Error) => {
       if (finished) return; finished = true;
-      clearTimeout(startTimer); clearTimeout(endTimer);
+      clearTimeout(startTimer); clearTimeout(endTimer); clearInterval(poll);
       signal.removeEventListener('abort', cancel);
       utterance.onstart = utterance.onend = utterance.onerror = null;
       onSpeaking(false);
@@ -18,8 +18,18 @@ export function playSpeech(text: string, voiceName: string, signal: AbortSignal,
     const cancel = () => finish(Error('音声再生を終了しました。'));
     const startTimer = setTimeout(() => finish(Error('音声再生には画面の操作が必要です。')), 10000);
     const endTimer = setTimeout(() => finish(Error('音声再生が中断されました。')), Math.min(300000, Math.max(45000, text.length * 500)));
-    utterance.onstart = () => { started = true; clearTimeout(startTimer); onSpeaking(true); };
-    utterance.onend = () => finish(started ? undefined : Error('音声が開始されませんでした。'));
+    let quietChecks = 0;
+    const markStarted = () => { if (!started) { started = true; clearTimeout(startTimer); onSpeaking(true); } };
+    // Some Safari sessions miss end/start events. Confirm the synthesis queue is
+    // actually empty for 900ms before reopening capture; never guess from text length.
+    const poll = setInterval(() => {
+      if (synth.speaking) { markStarted(); quietChecks = 0; }
+      else if (started && !synth.pending && !synth.paused) {
+        if (++quietChecks >= 3) finish();
+      } else quietChecks = 0;
+    }, 300);
+    utterance.onstart = markStarted;
+    utterance.onend = () => finish();
     utterance.onerror = () => finish(Error('音声を再生できませんでした。'));
     signal.addEventListener('abort', cancel, { once: true });
     try { synth.cancel(); synth.speak(utterance); } catch { finish(Error('音声を再生できませんでした。')); }
