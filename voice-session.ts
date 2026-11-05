@@ -1,4 +1,4 @@
-export type VoicePhase = 'idle' | 'finishing' | 'starting' | 'listening' | 'recovering' | 'mic-paused' | 'waiting' | 'speaking' | 'paused';
+export type VoicePhase = 'idle' | 'finishing' | 'starting' | 'listening' | 'recovering' | 'mic-ready' | 'mic-paused' | 'waiting' | 'speaking' | 'paused';
 export type Recognition = {
   lang: string; continuous: boolean; interimResults: boolean;
   onstart: null | (() => void);
@@ -18,6 +18,7 @@ type Ports = {
   error(text: string): void;
   diagnostic?: (event: string) => void;
   preferPlaybackGesture?: boolean;
+  preferMicrophoneGesture?: boolean;
   playbackGestureRequired?: () => void;
   wait?: (milliseconds: number) => Promise<void>;
 };
@@ -70,7 +71,7 @@ export class VoiceSession {
     void this.wait(1200 * this.retries).then(() => { if (this.current(epoch)) this.listen(epoch); });
   }
   restartMicrophone() {
-    if (!this.aborter || !['starting','listening','recovering','mic-paused'].includes(this.phase)) return;
+    if (!this.aborter || !['starting','listening','recovering','mic-ready','mic-paused'].includes(this.phase)) return;
     this.ports.diagnostic?.('recognition:manual-restart');
     ++this.epoch; this.release(); this.retries = 0; this.ports.error('');
     // A user gesture provides a recovery route where Safari denies automatic start.
@@ -176,7 +177,14 @@ export class VoiceSession {
       return;
     }
     if (!this.current(epoch)) return;
-    this.pending = ''; this.afterPlayback = true; this.ports.cancelSpeech(); this.set('recovering');
+    // speak() resolves only after end (or an empty queue confirmed by playback).
+    // Cancelling a successfully ended utterance adds an unnecessary audio operation.
+    this.pending = ''; this.afterPlayback = true;
+    if (this.ports.preferMicrophoneGesture) {
+      this.ports.diagnostic?.('recognition:gesture-required');
+      this.ports.error(''); this.set('mic-ready'); return;
+    }
+    this.set('recovering');
     await this.wait(1200);
     if (this.current(epoch)) this.listen(epoch);
   }

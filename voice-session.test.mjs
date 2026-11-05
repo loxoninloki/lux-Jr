@@ -144,3 +144,33 @@ test('audio hardware failure does not assume a user gesture is the cause',async(
  let learned=0;const h=setup({speak:async()=>{throw Object.assign(Error(),{code:'speech-playback-failed'})},playbackGestureRequired:()=>learned++});
  h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();assert.equal(learned,0);assert.equal(h.session.phase,'paused');h.session.stop();
 });
+
+test('button microphone mode waits after playback and starts capture in the click call stack for three turns',async(t)=>{
+ t.mock.timers.enable({apis:['setTimeout']});let waitCalls=0,plays=0;
+ const h=setup({preferPlaybackGesture:true,preferMicrophoneGesture:true,wait:async()=>{waitCalls++},speak:async()=>{plays++}});
+ h.session.start();
+ for(let turn=0;turn<3;turn++){
+   const rec=h.recognizers[turn];h.result(rec,`発話${turn}`);rec.onend();await flush();
+   assert.equal(h.session.phase,'paused');h.session.restartMicrophone();assert.equal(h.recognizers.length,turn+1);
+   h.session.resume();await flush();assert.equal(h.session.phase,'mic-ready');assert.equal(plays,turn+1);
+   t.mock.timers.tick(30000);await flush();assert.equal(h.recognizers.length,turn+1);assert.equal(h.requests.length,turn+1);
+   h.session.restartMicrophone();assert.equal(h.session.phase,'listening');assert.equal(h.recognizers.length,turn+2);
+ }
+ assert.equal(waitCalls,0);h.session.stop();
+});
+test('successful playback does not cancel the completed speech before microphone handoff',async()=>{
+ let cancels=0;const h=setup({cancelSpeech:()=>cancels++});h.session.start();const initial=cancels;
+ h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();assert.equal(h.session.phase,'listening');assert.equal(cancels,initial);
+ h.session.stop();assert.ok(cancels>initial);
+});
+test('button microphone mode cannot open capture during playback or after stop',async()=>{
+ let finish;const h=setup({preferMicrophoneGesture:true,speak:()=>new Promise(r=>finish=r)});
+ h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();assert.equal(h.session.phase,'speaking');
+ h.session.restartMicrophone();assert.equal(h.recognizers.length,1);finish();await flush();assert.equal(h.session.phase,'mic-ready');
+ h.session.stop();h.session.restartMicrophone();h.session.resume();await flush();assert.equal(h.recognizers.length,1);assert.equal(h.requests.length,1);
+});
+test('a stopped or failed playback cannot signal that the microphone is ready',async()=>{
+ let finish;const h=setup({preferMicrophoneGesture:true,speak:()=>new Promise(r=>finish=r)});
+ h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();h.session.stop();finish();await flush();assert.equal(h.session.phase,'idle');assert.ok(!h.phases.includes('mic-ready'));
+ const j=setup({preferMicrophoneGesture:true,speak:async()=>{throw Error('failed')}});j.session.start();j.result(j.recognizers[0]);j.recognizers[0].onend();await flush();assert.equal(j.session.phase,'paused');assert.ok(!j.phases.includes('mic-ready'));j.session.stop();
+});
