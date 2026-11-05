@@ -79,14 +79,22 @@ export async function openLiveSocket(ledger, request) {
     try {
       const value = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data));
       if (value.setupComplete) { ready=true; clearTimeout(handshake); }
-      if (value.error) { close('Gemini Liveを利用できません。無料枠・利用制限をご確認ください。'); return; }
+      if (value.error) {
+        const code = Number(value.error.code);
+        const label = [400,401,403,404,429,500,503].includes(code) ? `（${code}）` : '';
+        close(`Gemini Liveが接続を拒否しました${label}。無料枠・モデルの利用権限をご確認ください。`); return;
+      }
       server.send(JSON.stringify(value));
       if (value.serverContent?.turnComplete && ++turns >= 12) close('今回の試用は12往復までです。');
       if (value.goAway) close('Geminiが接続を終了しました。再開には開始ボタンを押してください。');
     } catch { close('音声応答を受信できませんでした。'); }
   });
   server.addEventListener('close',()=>close());server.addEventListener('error',()=>close('端末との接続が切れました。'));
-  upstream.addEventListener('close',()=>close('Gemini Liveの接続が終了しました。利用制限の場合は時間を置いてお試しください。'));
+  upstream.addEventListener('close',event=>{
+    const code = Number(event.code);
+    const label = Number.isInteger(code) && code >= 1000 && code < 5000 ? `（${code}）` : '';
+    close(`Gemini Liveの接続が終了しました${label}。${ready ? '利用制限の場合は時間を置いてお試しください。' : '開始設定が受理されていません。モデルの利用権限・無料枠をご確認ください。'}`);
+  });
   upstream.addEventListener('error',()=>close('Gemini Liveと通信できませんでした。'));
   try { upstream.send(JSON.stringify(liveSetup(saved.instructions))); } catch { close('音声会話の設定に失敗しました。'); }
   return new Response(null,{status:101,webSocket:client});

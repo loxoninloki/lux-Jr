@@ -59,7 +59,7 @@ test('native Live keeps the microphone open through playback and clears queued a
  const tracks=[{stopped:false,stop(){this.stopped=true}}],sources=[];let socket,capture;
  class Context {state='running';currentTime=0;destination={};audioWorklet={addModule:async()=>{}};async resume(){}async close(){this.state='closed'}createMediaStreamSource(){return {connect(){},disconnect(){}}}createBuffer(_,size,rate){return {duration:size/rate,getChannelData:()=>new Float32Array(size)}}createBufferSource(){const source={connect(){},disconnect(){},start(){},stop(){this.stopped=true}};sources.push(source);return source}}
  class WS {static OPEN=1;readyState=1;bufferedAmount=0;sent=[];constructor(){socket=this}send(v){this.sent.push(v)}close(){this.closed=true}}
- class Capture {constructor(){capture=this;this.port={}}connect(){}disconnect(){}}
+ class Capture {constructor(){capture=this;this.port={}}connect(){queueMicrotask(()=>this.port.onmessage?.({data:{pcm:new ArrayBuffer(3200),level:.2}}))}disconnect(){}}
  for(const [name,value]of Object.entries({window:{AudioContext:Context},AudioContext:Context,AudioWorkletNode:Capture,WebSocket:WS,navigator:{mediaDevices:{getUserMedia:async()=>({getTracks:()=>tracks})}}}))Object.defineProperty(globalThis,name,{configurable:true,writable:true,value});
  t.after(()=>{for(const [n,d]of originals)d?Object.defineProperty(globalThis,n,d):delete globalThis[n]});
  const live=new LiveConversation({phase(){},error(){},diagnostic(){},transcript(){},preview(){},ticket:async()=>({ticket:'unit-test',seconds:120,endpoint:'https://unit.test'})});
@@ -68,4 +68,33 @@ test('native Live keeps the microphone open through playback and clears queued a
  capture.port.onmessage({data:{pcm:new ArrayBuffer(3200)}});assert.equal(socket.sent.length,1);assert.equal(tracks[0].stopped,false);
  socket.onmessage({data:JSON.stringify({serverContent:{interrupted:true}})});assert.equal(sources[0].stopped,true);assert.equal(tracks[0].stopped,false);
  live.stop();assert.equal(tracks[0].stopped,true);assert.equal(socket.closed,true);
+});
+
+function fakeBrowser(t,{autoFrame=true}={}){
+ const names=['window','AudioContext','AudioWorkletNode','WebSocket','navigator'];
+ const original=new Map(names.map(n=>[n,Object.getOwnPropertyDescriptor(globalThis,n)]));
+ let capture,socket,context;const tracks=[{stopped:false,stop(){this.stopped=true}}];
+ class Context {state='running';currentTime=0;destination={};audioWorklet={addModule:async()=>{}};constructor(){context=this}async resume(){this.state='running';this.onstatechange?.()}async close(){this.state='closed'}createMediaStreamSource(){return{connect(){},disconnect(){}}}createBuffer(_,n,rate){return{duration:n/rate,getChannelData:()=>new Float32Array(n)}}createBufferSource(){return{connect(){},disconnect(){},start(){},stop(){}}}}
+ class WS {static OPEN=1;readyState=1;bufferedAmount=0;sent=[];constructor(){socket=this}send(v){this.sent.push(v)}close(){this.closed=true}}
+ class Capture {constructor(){capture=this;this.port={}}connect(){if(autoFrame)queueMicrotask(()=>this.port.onmessage?.({data:{pcm:new ArrayBuffer(3200),level:.1}}))}disconnect(){}}
+ for(const [n,value]of Object.entries({window:{AudioContext:Context},AudioContext:Context,AudioWorkletNode:Capture,WebSocket:WS,navigator:{mediaDevices:{getUserMedia:async()=>({getTracks:()=>tracks})}}}))Object.defineProperty(globalThis,n,{configurable:true,writable:true,value});
+ t.after(()=>{for(const[n,d]of original)d?Object.defineProperty(globalThis,n,d):delete globalThis[n]});
+ return{get capture(){return capture},get context(){return context},get socket(){return socket},tracks};
+}
+test('Safari audio interruption offers gesture resume and preserves the live connection',async(t)=>{
+ const {LiveConversation}=await import('./live-audio.ts');const h=fakeBrowser(t);let health;
+ const live=new LiveConversation({phase(){},error(){},diagnostic(){},transcript(){},preview(){},health:v=>health=v,ticket:async()=>({ticket:'unit',seconds:120,endpoint:'https://unit.test'})});t.after(()=>live.stop());
+ await live.start();h.socket.onmessage({data:JSON.stringify({setupComplete:{}})});
+ h.context.state='interrupted';h.context.onstatechange();assert.equal(health.needsResume,true);
+ h.capture.port.onmessage({data:{pcm:new ArrayBuffer(3200),level:.3}});assert.equal(h.socket.sent.length,0);
+ await live.resumeAudio();assert.equal(health.needsResume,false);
+ h.capture.port.onmessage({data:{pcm:new ArrayBuffer(3200),level:.3}});assert.equal(h.socket.sent.length,1);assert.equal(h.tracks[0].stopped,false);
+ live.stop();assert.equal(h.tracks[0].stopped,true);assert.equal(h.socket.closed,true);
+});
+test('missing microphone frames never consume a Live trial; stopping preparation releases tracks',async(t)=>{
+ const {LiveConversation}=await import('./live-audio.ts');const h=fakeBrowser(t,{autoFrame:false});let tickets=0;
+ const live=new LiveConversation({phase(){},error(){},diagnostic(){},transcript(){},preview(){},ticket:async()=>{tickets++;return{ticket:'unit',seconds:120,endpoint:'https://unit.test'}}});t.after(()=>live.stop());
+ const starting=live.start();await new Promise(resolve=>setImmediate(resolve));assert.ok(h.capture);assert.equal(tickets,0);
+ const late=h.capture.port.onmessage;live.stop();late({data:{pcm:new ArrayBuffer(3200)}});await starting;
+ assert.equal(tickets,0);assert.equal(h.tracks[0].stopped,true);
 });
