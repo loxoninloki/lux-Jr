@@ -24,3 +24,8 @@ test('end without start event still completes; a rejected start does not resume 
  const synth=setup(t),control=new AbortController();const done=playSpeech('こんにちは','',control.signal,()=>{});synth.utterance.onend();await done;
  const failed=playSpeech('こんにちは','',control.signal,()=>{});const rejected=assert.rejects(failed);t.mock.timers.tick(10000);await rejected;
 });
+test('late start callback after cancellation cannot revive playback state',async(t)=>{
+ const synth=setup(t),control=new AbortController(),states=[];
+ const done=playSpeech('こんにちは','',control.signal,v=>states.push(v));const rejected=assert.rejects(done),late=synth.utterance.onstart;
+ control.abort();late();await rejected;assert.deepEqual(states,[false]);
+});

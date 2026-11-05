@@ -73,13 +73,13 @@ test('native Live keeps the microphone open through playback and clears queued a
 function fakeBrowser(t,{autoFrame=true}={}){
  const names=['window','AudioContext','AudioWorkletNode','WebSocket','navigator'];
  const original=new Map(names.map(n=>[n,Object.getOwnPropertyDescriptor(globalThis,n)]));
- let capture,socket,context;const tracks=[{stopped:false,stop(){this.stopped=true}}];
- class Context {state='running';currentTime=0;destination={};audioWorklet={addModule:async()=>{}};constructor(){context=this}async resume(){this.state='running';this.onstatechange?.()}async close(){this.state='closed'}createMediaStreamSource(){return{connect(){},disconnect(){}}}createBuffer(_,n,rate){return{duration:n/rate,getChannelData:()=>new Float32Array(n)}}createBufferSource(){return{connect(){},disconnect(){},start(){},stop(){}}}}
+ let capture,socket,context;const sources=[];const tracks=[{stopped:false,stop(){this.stopped=true}}];
+ class Context {state='running';currentTime=0;destination={};audioWorklet={addModule:async()=>{}};constructor(){context=this}async resume(){this.state='running';this.onstatechange?.()}async close(){this.state='closed'}createMediaStreamSource(){return{connect(){},disconnect(){}}}createBuffer(_,n,rate){return{duration:n/rate,getChannelData:()=>new Float32Array(n)}}createBufferSource(){const source={connect(){},disconnect(){},start(){},stop(){}};sources.push(source);return source;}}
  class WS {static OPEN=1;readyState=1;bufferedAmount=0;sent=[];constructor(){socket=this}send(v){this.sent.push(v)}close(){this.closed=true}}
  class Capture {constructor(){capture=this;this.port={}}connect(){if(autoFrame)queueMicrotask(()=>this.port.onmessage?.({data:{pcm:new ArrayBuffer(3200),level:.1}}))}disconnect(){}}
  for(const [n,value]of Object.entries({window:{AudioContext:Context},AudioContext:Context,AudioWorkletNode:Capture,WebSocket:WS,navigator:{mediaDevices:{getUserMedia:async()=>({getTracks:()=>tracks})}}}))Object.defineProperty(globalThis,n,{configurable:true,writable:true,value});
  t.after(()=>{for(const[n,d]of original)d?Object.defineProperty(globalThis,n,d):delete globalThis[n]});
- return{get capture(){return capture},get context(){return context},get socket(){return socket},tracks};
+ return{get capture(){return capture},get context(){return context},get socket(){return socket},tracks,sources};
 }
 test('Safari audio interruption offers gesture resume and preserves the live connection',async(t)=>{
  const {LiveConversation}=await import('./live-audio.ts');const h=fakeBrowser(t);let health;
@@ -97,4 +97,38 @@ test('missing microphone frames never consume a Live trial; stopping preparation
  const starting=live.start();await new Promise(resolve=>setImmediate(resolve));assert.ok(h.capture);assert.equal(tickets,0);
  const late=h.capture.port.onmessage;live.stop();late({data:{pcm:new ArrayBuffer(3200)}});await starting;
  assert.equal(tickets,0);assert.equal(h.tracks[0].stopped,true);
+});
+
+const audioMessage=(data='AAAAAA==')=>({data:JSON.stringify({serverContent:{modelTurn:{parts:[{inlineData:{mimeType:'audio/pcm;rate=24000',data}}]}}})});
+function conversation(health,events,extra={}){return new LiveConversationForTests({phase(){},error(){},diagnostic:v=>events.push(v),transcript(){},preview(){},health,ticket:async()=>({ticket:'private-ticket',seconds:120,endpoint:'https://unit.test'}),...extra});}
+// Reuse the production class with browser ports; no real audio or credentials.
+import { LiveConversation as LiveConversationForTests } from './live-audio.ts';
+test('received, scheduled and ended are separate; suspended output resumes the bounded queue',async(t)=>{
+ const h=fakeBrowser(t),events=[];let health;
+ const live=conversation(v=>health=v,events);t.after(()=>live.stop());await live.start();h.socket.onmessage({data:JSON.stringify({setupComplete:{}})});
+ h.context.state='suspended'; // Recheck even when Safari misses statechange.
+ h.socket.onmessage(audioMessage());assert.equal(health.needsResume,true);
+ for(const event of ['live:audio-received','live:playback-blocked','live:playback-scheduled'])assert.ok(events.includes(event));
+ assert.equal(events.includes('live:playback-ended'),false);await live.resumeAudio();assert.equal(health.needsResume,false);
+ h.sources[0].onended();assert.ok(events.includes('live:playback-ended'));
+ assert.equal(events.some(e=>e.includes('private-ticket')),false);
+});
+test('malformed audio reports playback failure and releases resources',async(t)=>{
+ const h=fakeBrowser(t),events=[];const live=conversation(()=>{},events);t.after(()=>live.stop());await live.start();
+ h.socket.onmessage(audioMessage('AA=='));assert.ok(events.includes('live:playback-failed'));assert.equal(h.tracks[0].stopped,true);assert.equal(h.socket.closed,true);
+});
+test('no-audio turn and failed socket produce distinct diagnostics',async(t)=>{
+ const h=fakeBrowser(t),events=[];const live=conversation(()=>{},events);t.after(()=>live.stop());await live.start();
+ h.socket.onmessage({data:JSON.stringify({setupComplete:{},serverContent:{turnComplete:true}})});assert.ok(events.includes('live:turn-without-audio'));
+ h.socket.onerror();assert.ok(events.includes('live:websocket-error'));assert.equal(h.tracks[0].stopped,true);
+});
+test('microphone denial is diagnosed before a ticket is requested',async(t)=>{
+ fakeBrowser(t);navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('private detail','NotAllowedError')};
+ const events=[];let tickets=0;const live=conversation(()=>{},events,{ticket:async()=>{tickets++;throw Error()}});t.after(()=>live.stop());await live.start();
+ assert.ok(events.includes('live:microphone-denied'));assert.equal(tickets,0);assert.equal(events.some(e=>e.includes('private detail')),false);
+});
+test('upstream numeric close code is recorded without its potentially sensitive reason',async(t)=>{
+ const h=fakeBrowser(t),events=[];const live=conversation(()=>{},events);t.after(()=>live.stop());await live.start();
+ h.socket.onmessage({data:JSON.stringify({luxClosed:'接続終了',luxDiagnostic:'live:upstream-close-1008',reason:'secret'})});
+ assert.ok(events.includes('live:upstream-close-1008'));assert.equal(events.some(e=>e.includes('secret')),false);
 });

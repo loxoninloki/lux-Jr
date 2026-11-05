@@ -8,10 +8,16 @@ test('manual input previews interim text and preserves it when Safari ends witho
  const result=[{transcript:'こんにちは'}];result.isFinal=false;h.rec.onresult({results:[result]});assert.equal(h.text.at(-1),'こんにちは');h.rec.onend();assert.equal(h.text.at(-1),'こんにちは');assert.equal(h.rec.aborted,true);assert.equal(h.phases.at(-1),'idle');
 });
 test('manual input handles missing end and ignores late result after cancel',t=>{
- t.mock.timers.enable({apis:['setTimeout']});const h=dictation();h.d.start();h.rec.onstart();const late=h.rec.onresult;const result=[{transcript:'ろき様'}];result.isFinal=true;h.rec.onresult({results:[result]});t.mock.timers.tick(1500);assert.equal(h.phases.at(-1),'idle');const length=h.text.length;late({results:[[{transcript:'古い結果'}]]});assert.equal(h.text.length,length);
+ t.mock.timers.enable({apis:['setTimeout']});const h=dictation();h.d.start();h.rec.onstart();const late=h.rec.onresult;const result=[{transcript:'ろき様'}];result.isFinal=true;h.rec.onresult({results:[result]});h.d.finish();t.mock.timers.tick(1500);assert.equal(h.phases.at(-1),'idle');const length=h.text.length;late({results:[[{transcript:'古い結果'}]]});assert.equal(h.text.length,length);
 });
 test('manual input reports an unacknowledged start rather than claiming to listen',t=>{
  t.mock.timers.enable({apis:['setTimeout']});const h=dictation();h.d.start();t.mock.timers.tick(8000);assert.ok(h.errors.at(-1).includes('起動しません'));assert.equal(h.phases.includes('listening'),false);assert.equal(h.rec.aborted,true);
+});
+test('dictation composes multiple segments once and cancel restores the original editor text',t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const h=dictation();h.d.start();h.rec.onstart();assert.equal(h.rec.continuous,true);
+ const results=[Object.assign([{transcript:'最初。'}],{isFinal:true}),Object.assign([{transcript:'続き'}],{isFinal:false})];
+ h.rec.onresult({results});h.rec.onresult({results});assert.equal(h.text.at(-1),'最初。続き');assert.equal(h.phases.at(-1),'listening');
+ h.d.cancel();assert.equal(h.text.at(-1),'');h.d.start();h.rec.onstart();h.rec.onresult({results});h.d.finish();h.rec.onend();assert.equal(h.text.at(-1),'最初。続き');
 });
 function context(){let legacy;const input={connect(){},disconnect(){}};const ctx={state:'running',sampleRate:48000,destination:{},createMediaStreamSource:()=>input,audioWorklet:{addModule:async()=>{throw Error('load')}},createScriptProcessor(){legacy={connect(){},disconnect(){},onaudioprocess:null};return legacy}};return{ctx,get legacy(){return legacy}};}
 test('failed worklet uses local compatibility capture with correct signed PCM and silent output',async()=>{
