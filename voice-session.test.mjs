@@ -15,7 +15,7 @@ function setup(overrides={}) {
 }
 test('waits for microphone end, sends once, speaks, then listens again',async()=>{
  const t=setup();t.session.start();const rec=t.recognizers[0];
- t.result(rec);t.result(rec);assert.equal(t.requests.length,0);assert.equal(rec.stopped,true);
+ t.result(rec);t.result(rec);assert.equal(t.requests.length,0);assert.equal(rec.stopped,undefined);
  rec.onend();await flush();assert.equal(t.requests.length,1);assert.equal(t.spoken.length,1);assert.equal(t.recognizers.length,2);assert.equal(t.session.phase,'listening');t.session.stop();
 });
 test('stop discards queued recognition callbacks and cannot auto-send',async()=>{
@@ -78,7 +78,7 @@ test('stop during recovery delay never restarts the microphone',async()=>{
 
 test('final transcript survives missing end event and is submitted once',async(context)=>{
  context.mock.timers.enable({apis:['setTimeout']});const t=setup();t.session.start();const rec=t.recognizers[0],lateEnd=rec.onend;
- t.result(rec);context.mock.timers.tick(4000);await flush();assert.equal(t.requests.length,1);assert.equal(t.requests[0].text,'こんにちは');assert.equal(rec.aborted,true);
+ t.result(rec);context.mock.timers.tick(1800);context.mock.timers.tick(4000);await flush();assert.equal(t.requests.length,1);assert.equal(t.requests[0].text,'こんにちは');assert.equal(rec.aborted,true);
  lateEnd();await flush();assert.equal(t.requests.length,1);t.session.stop();
 });
 test('manual finish submits interim text only when explicitly requested',async()=>{
@@ -91,4 +91,18 @@ test('recognizer aborted error after a final result does not discard the utteran
 });
 test('stop while finishing prevents delayed submission',async(context)=>{
  context.mock.timers.enable({apis:['setTimeout']});const t=setup();t.session.start();t.result(t.recognizers[0]);t.session.stop();context.mock.timers.tick(8000);await flush();assert.equal(t.requests.length,0);
+});
+
+test('final segments do not end capture immediately and repeated results send once after silence',async(t)=>{
+ t.mock.timers.enable({apis:['setTimeout']});const h=setup();h.session.start();const rec=h.recognizers[0];
+ assert.equal(rec.continuous,true);h.result(rec,'一文目。');assert.equal(rec.stopped,undefined);
+ t.mock.timers.tick(1000);const results=[Object.assign([{transcript:'一文目。'}],{isFinal:true}),Object.assign([{transcript:'二文目。'}],{isFinal:true})];
+ rec.onresult({results});rec.onresult({results});t.mock.timers.tick(1799);assert.equal(rec.stopped,undefined);
+ t.mock.timers.tick(1);assert.equal(rec.stopped,true);assert.equal(h.requests.length,0);
+ const end=rec.onend;end();end();await flush();assert.equal(h.requests.length,1);assert.equal(h.requests[0].text,'一文目。二文目。');h.session.stop();
+});
+test('explicit finish preserves interim suffix after a final segment',async()=>{
+ const h=setup();h.session.start();const rec=h.recognizers[0];
+ rec.onresult({results:[Object.assign([{transcript:'確定。'}],{isFinal:true}),Object.assign([{transcript:'続き'}],{isFinal:false})]});
+ h.session.finishSpeaking();rec.onend();await flush();assert.equal(h.requests[0].text,'確定。続き');h.session.stop();
 });

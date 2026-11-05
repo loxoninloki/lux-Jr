@@ -19,7 +19,7 @@ export function playSpeech(text: string, voiceName: string, signal: AbortSignal,
     const startTimer = setTimeout(() => finish(Error('音声再生には画面の操作が必要です。')), 10000);
     const endTimer = setTimeout(() => finish(Error('音声再生が中断されました。')), Math.min(300000, Math.max(45000, text.length * 500)));
     let quietChecks = 0;
-    const markStarted = () => { if (!started) { started = true; clearTimeout(startTimer); onSpeaking(true); } };
+    const markStarted = () => { if (!finished && !started) { started = true; clearTimeout(startTimer); onSpeaking(true); } };
     // Some Safari sessions miss end/start events. Confirm the synthesis queue is
     // actually empty for 900ms before reopening capture; never guess from text length.
     const poll = setInterval(() => {

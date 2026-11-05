@@ -72,12 +72,12 @@ export class VoiceSession {
     if (!this.current(epoch)) return;
     let rec: Recognition;
     try { rec = this.ports.createRecognition(); } catch { this.fail('このブラウザでは音声会話を開始できません。Safariの音声入力をご確認ください。'); return; }
-    this.rec = rec; rec.lang = 'ja-JP'; rec.continuous = false; rec.interimResults = true;
+    this.rec = rec; rec.lang = 'ja-JP'; rec.continuous = true; rec.interimResults = true;
     const finals = new Map<number, string>(); let ended = false; let closing = false; let draft = ''; let manualFinish = false;
     const valid = () => this.current(epoch) && this.rec === rec && !ended;
     const submit = () => {
       if (!valid()) return; ended = true;
-      const text = ([...finals.values()].join('') || (manualFinish ? draft : '')).trim();
+      const text = (manualFinish ? draft : [...finals.values()].join('')).trim();
       this.release();
       if (!text) { this.recover(epoch); return; }
       if (text.length > 4000) { this.fail('一度のお話が長すぎました。短く区切ってお話しください。'); return; }
@@ -114,13 +114,12 @@ export class VoiceSession {
       }
       draft = [...finals.values()].join('') + interim; this.ports.transcript(draft);
       if (closing) return;
-      clearTimeout(this.watchdog); this.watchdog = setTimeout(() => close(), 60000);
-      if (finals.size) close();
+      clearTimeout(this.watchdog); this.watchdog = setTimeout(() => close(), finals.size ? 1800 : 5000);
     };
     rec.onerror = event => {
       if (!valid()) return;
       this.ports.diagnostic?.('recognition:error');
-      if (closing && (finals.size || manualFinish && draft.trim())) { submit(); return; }
+      if ((closing || event.error === 'aborted') && (finals.size || manualFinish && draft.trim())) { submit(); return; }
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         this.pauseMic('マイクを再開できませんでした。Safariのマイク許可を確認し、「マイクを再開」を押してください。');
       } else if (['no-speech','aborted','network','audio-capture'].includes(event.error)) this.recover(epoch);
