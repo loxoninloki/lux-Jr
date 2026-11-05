@@ -41,3 +41,9 @@ test('a rejected playback records safe error codes, never exception text',async(
  const rejected=assert.rejects(done);synth.utterance.onerror({error:'private content'});await rejected;
  assert.deepEqual(events,['speech:queued','speech:error-other']);
 });
+test('start timeout returns a safe machine code for gesture recovery',async t=>{
+ setup(t);const done=playSpeech('固定文','',new AbortController().signal,()=>{});const rejected=assert.rejects(done,{code:'speech-start-timeout'});t.mock.timers.tick(10000);await rejected;
+});
+test('not-allowed is distinguished from other synthesis errors',async t=>{
+ const synth=setup(t);const done=playSpeech('固定文','',new AbortController().signal,()=>{});const rejected=assert.rejects(done,{code:'speech-not-allowed'});synth.utterance.onerror({error:'not-allowed'});await rejected;
+});

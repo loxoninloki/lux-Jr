@@ -121,3 +121,26 @@ test('recognition errors record only safe codes and stale audio callbacks are ig
  rec.onerror({error:'private transcript'});assert.ok(events.includes('recognition:error-other'));
  const count=events.length;late();assert.equal(events.length,count);h.session.stop();
 });
+
+test('a start timeout switches following replies to gesture playback without resending requests',async()=>{
+ let plays=0,learned=0;const h=setup({speak:async()=>{if(++plays===1)throw Object.assign(Error('blocked'),{code:'speech-start-timeout'})},playbackGestureRequired:()=>learned++});
+ h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();assert.equal(h.session.phase,'paused');assert.equal(learned,1);
+ h.session.resume();await flush();assert.equal(plays,2);assert.equal(h.requests.length,1);
+ h.result(h.recognizers[1],'次の言葉');h.recognizers[1].onend();await flush();
+ assert.equal(h.session.phase,'paused');assert.equal(plays,2);assert.equal(h.requests.length,2);
+ h.session.resume();await flush();assert.equal(plays,3);assert.equal(h.requests.length,2);h.session.stop();
+});
+test('preferred gesture mode queues a reply and starts speak synchronously on one click',async()=>{
+ let plays=0,endPlayback;const h=setup({preferPlaybackGesture:true,speak:()=>{plays++;return new Promise(r=>endPlayback=r)}});
+ h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();assert.equal(plays,0);assert.equal(h.session.phase,'paused');
+ h.session.resume();assert.equal(plays,1);h.session.resume();assert.equal(plays,1);assert.equal(h.recognizers.length,1);
+ endPlayback();await flush();assert.equal(h.recognizers.length,2);assert.equal(h.requests.length,1);h.session.stop();
+});
+test('stop discards pending gesture playback and late failed speech cannot change mode',async()=>{
+ const h=setup({preferPlaybackGesture:true});h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();h.session.stop();h.session.resume();await flush();assert.equal(h.spoken.length,0);
+ let rejectSpeech,learned=0;const j=setup({speak:()=>new Promise((_,reject)=>rejectSpeech=reject),playbackGestureRequired:()=>learned++});j.session.start();j.result(j.recognizers[0]);j.recognizers[0].onend();await flush();j.session.stop();rejectSpeech(Object.assign(Error(),{code:'speech-not-allowed'}));await flush();assert.equal(learned,0);assert.equal(j.session.phase,'idle');
+});
+test('audio hardware failure does not assume a user gesture is the cause',async()=>{
+ let learned=0;const h=setup({speak:async()=>{throw Object.assign(Error(),{code:'speech-playback-failed'})},playbackGestureRequired:()=>learned++});
+ h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();assert.equal(learned,0);assert.equal(h.session.phase,'paused');h.session.stop();
+});

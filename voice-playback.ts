@@ -16,7 +16,7 @@ export function playSpeech(text: string, voiceName: string, signal: AbortSignal,
       if (error) { synth.cancel(); reject(error); } else resolve();
     };
     const cancel = () => { diagnostic('speech:cancelled'); finish(Error('音声再生を終了しました。')); };
-    const startTimer = setTimeout(() => { diagnostic('speech:start-timeout'); finish(Error('音声再生には画面の操作が必要です。')); }, 10000);
+    const startTimer = setTimeout(() => { diagnostic('speech:start-timeout'); finish(Object.assign(Error('音声再生には画面の操作が必要です。'),{code:'speech-start-timeout'})); }, 10000);
     const endTimer = setTimeout(() => { diagnostic('speech:end-timeout'); finish(Error('音声再生が中断されました。')); }, Math.min(300000, Math.max(45000, text.length * 500)));
     let quietChecks = 0;
     const markStarted = () => { if (!finished && !started) { started = true; clearTimeout(startTimer); onSpeaking(true); } };
@@ -33,7 +33,7 @@ export function playSpeech(text: string, voiceName: string, signal: AbortSignal,
     utterance.onerror = event => {
       if(finished)return;
       const code=['not-allowed','audio-busy','audio-hardware','network','synthesis-unavailable','synthesis-failed','language-unavailable','voice-unavailable','text-too-long','invalid-argument','canceled','interrupted'].includes(event.error)?event.error:'other';
-      diagnostic(`speech:error-${code}`);finish(Error('音声を再生できませんでした。'));
+      diagnostic(`speech:error-${code}`);finish(Object.assign(Error('音声を再生できませんでした。'),{code:code==='not-allowed'?'speech-not-allowed':'speech-playback-failed'}));
     };
     signal.addEventListener('abort', cancel, { once: true });
     try {

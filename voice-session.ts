@@ -17,6 +17,8 @@ type Ports = {
   transcript(text: string): void;
   error(text: string): void;
   diagnostic?: (event: string) => void;
+  preferPlaybackGesture?: boolean;
+  playbackGestureRequired?: () => void;
   wait?: (milliseconds: number) => Promise<void>;
 };
 /** Each capture is disposable: fully release it before TTS, and verify restart. */
@@ -29,6 +31,7 @@ export class VoiceSession {
   private finishCapture: (() => void) | null = null;
   private retries = 0;
   private afterPlayback = false;
+  private needsPlaybackGesture = false;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private ports: Ports;
   constructor(ports: Ports) { this.ports = ports; }
@@ -47,6 +50,7 @@ export class VoiceSession {
   }
   start() {
     this.stop(); this.retries = 0; this.ports.error(''); this.aborter = new AbortController();
+    this.needsPlaybackGesture = !!this.ports.preferPlaybackGesture;
     this.listen(this.epoch);
   }
   stop() {
@@ -155,12 +159,20 @@ export class VoiceSession {
       if (this.current(epoch)) this.fail(error instanceof Error ? error.message : '通信できませんでした。音声会話を終了しました。');
     }
   }
-  private async play(epoch: number) {
+  private async play(epoch: number, fromGesture = false) {
     if (!this.current(epoch)) return;
+    if (this.needsPlaybackGesture && !fromGesture) {
+      this.ports.diagnostic?.('speech:gesture-required');
+      this.ports.error(''); this.set('paused'); return;
+    }
     this.set('speaking');
     try { await this.ports.speak(this.pending, this.aborter!.signal); }
-    catch {
-      if (this.current(epoch)) { this.set('paused'); this.ports.error('音声を再生できませんでした。「返答を再生して続ける」を押してください。'); }
+    catch (error) {
+      if (this.current(epoch)) {
+        const gestureBlocked = !!error && typeof error==='object' && 'code' in error && ['speech-start-timeout','speech-not-allowed'].includes(String(error.code));
+        if (gestureBlocked) { this.needsPlaybackGesture=true; this.ports.playbackGestureRequired?.(); this.ports.diagnostic?.('speech:gesture-required'); }
+        this.set('paused'); this.ports.error(gestureBlocked?'自動再生の開始を確認できません。「返答を再生して続ける」を押してください。以降のお返事もボタンで再生します。':'音声を再生できませんでした。「返答を再生して続ける」を押してください。');
+      }
       return;
     }
     if (!this.current(epoch)) return;
@@ -170,6 +182,7 @@ export class VoiceSession {
   }
   resume() {
     if (this.phase !== 'paused' || !this.pending || !this.aborter) return;
-    this.ports.error(''); void this.play(this.epoch);
+    // Keep speak() in the click call stack; do not await a timer or network here.
+    this.ports.error(''); void this.play(this.epoch, true);
   }
 }
