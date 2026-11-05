@@ -29,3 +29,15 @@ test('late start callback after cancellation cannot revive playback state',async
  const done=playSpeech('こんにちは','',control.signal,v=>states.push(v));const rejected=assert.rejects(done),late=synth.utterance.onstart;
  control.abort();late();await rejected;assert.deepEqual(states,[false]);
 });
+
+test('paused synthesis queue is explicitly resumed before the requested utterance',async(t)=>{
+ const synth=setup(t),events=[];let resumes=0;synth.paused=true;synth.resume=()=>{resumes++;synth.paused=false};
+ const done=playSpeech('こんにちは','',new AbortController().signal,()=>{},v=>events.push(v));
+ assert.equal(resumes,1);synth.utterance.onstart();synth.utterance.onend();await done;
+ assert.deepEqual(events,['speech:queue-paused','speech:queued','speech:start-event','speech:end-event']);
+});
+test('a rejected playback records safe error codes, never exception text',async(t)=>{
+ const synth=setup(t),events=[];const done=playSpeech('秘密の本文','',new AbortController().signal,()=>{},v=>events.push(v));
+ const rejected=assert.rejects(done);synth.utterance.onerror({error:'private content'});await rejected;
+ assert.deepEqual(events,['speech:queued','speech:error-other']);
+});

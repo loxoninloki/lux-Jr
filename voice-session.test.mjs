@@ -106,3 +106,18 @@ test('explicit finish preserves interim suffix after a final segment',async()=>{
  rec.onresult({results:[Object.assign([{transcript:'確定。'}],{isFinal:true}),Object.assign([{transcript:'続き'}],{isFinal:false})]});
  h.session.finishSpeaking();rec.onend();await flush();assert.equal(h.requests[0].text,'確定。続き');h.session.stop();
 });
+
+test('post-playback start with no results pauses without another request or restart loop',async(t)=>{
+ t.mock.timers.enable({apis:['setTimeout']});const events=[];const h=setup({diagnostic:v=>events.push(v)});
+ h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();
+ assert.equal(h.recognizers.length,2);const next=h.recognizers[1];next.onaudiostart();
+ t.mock.timers.tick(10000);await flush();assert.equal(h.session.phase,'mic-paused');
+ assert.equal(h.requests.length,1);assert.equal(h.recognizers.length,2);assert.ok(events.includes('recognition:no-results'));
+ assert.equal(next.aborted,true);h.session.restartMicrophone();assert.equal(h.recognizers.length,3);
+ h.result(h.recognizers[2],'二回目');h.recognizers[2].onend();await flush();assert.equal(h.requests.length,2);h.session.stop();
+});
+test('recognition errors record only safe codes and stale audio callbacks are ignored',()=>{
+ const events=[];const h=setup({diagnostic:v=>events.push(v)});h.session.start();const rec=h.recognizers[0],late=rec.onaudiostart;
+ rec.onerror({error:'private transcript'});assert.ok(events.includes('recognition:error-other'));
+ const count=events.length;late();assert.equal(events.length,count);h.session.stop();
+});
