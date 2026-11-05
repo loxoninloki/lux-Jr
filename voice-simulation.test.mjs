@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { simulateVoiceReply,SHORT_TEST_REPLY,LONG_TEST_REPLY } from './voice-simulation.ts';
+import { simulateVoiceReply,voiceTestSpeaker,SHORT_TEST_REPLY,LONG_TEST_REPLY } from './voice-simulation.ts';
 import { VoiceSession } from './voice-session.ts';
 const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
 test('simulated response waits the selected latency and selects short or long fixed audio text',async t=>{
@@ -42,4 +42,33 @@ test('stopping a voice session during simulated delay never speaks or restarts c
  t.mock.timers.enable({apis:['setTimeout']});let rec,spoke=0,created=0;
  const session=new VoiceSession({createRecognition(){created++;return rec={start(){this.onstart?.()},stop(){},abort(){}}},request:(_,signal)=>simulateVoiceReply(10000,true,signal,()=>{}),speak:async()=>{spoke++},cancelSpeech(){},phase(){},transcript(){},error(){},wait:async()=>{}});
  session.start();rec.onresult({results:[Object.assign([{transcript:'テスト'}],{isFinal:true})]});rec.onend();session.stop();t.mock.timers.tick(30000);await flush();assert.equal(spoke,0);assert.equal(created,1);
+});
+
+test('recognition-only comparison repeats three delayed turns without invoking speech or fetch',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});t.mock.method(globalThis,'fetch',()=>{throw Error('must not use API')});
+ let spoken=0;const recs=[],events=[],requests=[];
+ const session=new VoiceSession({
+  createRecognition(){const rec={start(){this.onstart?.()},stop(){},abort(){}};recs.push(rec);return rec},
+  request:(text,signal)=>{requests.push(text);return simulateVoiceReply(3000,false,signal,e=>events.push(e))},
+  speak:voiceTestSpeaker(true,async()=>{spoken++},e=>events.push(e)),
+  cancelSpeech(){},phase(){},transcript(){},error(){},wait:async()=>{},
+ });
+ session.start();
+ for(let i=0;i<3;i++){
+   const rec=recs[i];rec.onresult({results:[Object.assign([{transcript:`発話${i}`}],{isFinal:true})]});rec.onend();
+   assert.equal(session.phase,'waiting');t.mock.timers.tick(3000);await flush();assert.equal(session.phase,'listening');assert.equal(recs.length,i+2);
+ }
+ assert.equal(spoken,0);assert.equal(fetch.mock.callCount(),0);assert.equal(requests.length,3);assert.equal(events.filter(e=>e==='recognition:test-playback-skipped').length,3);session.stop();
+});
+test('the comparison speaker preserves ordinary playback and rejects stopped calls without speech or diagnostics',async()=>{
+ const calls=[],events=[],controller=new AbortController();let finish;
+ const speak=(text,signal)=>{calls.push({text,signal});return new Promise(r=>finish=r)};
+ let ended=false;const p=voiceTestSpeaker(false,speak,e=>events.push(e))('通常の返答',controller.signal).then(()=>ended=true);
+ await flush();assert.equal(ended,false);assert.equal(calls.length,1);finish();await p;assert.equal(ended,true);assert.equal(events.length,0);
+ controller.abort();await assert.rejects(voiceTestSpeaker(true,speak,e=>events.push(e))('破棄',controller.signal),{name:'AbortError'});assert.equal(calls.length,1);assert.equal(events.length,0);
+});
+test('stopping during the recognition-only delay cannot restart or log skipped playback',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let rec,created=0;const events=[];
+ const session=new VoiceSession({createRecognition(){created++;return rec={start(){this.onstart?.()},stop(){},abort(){}}},request:(_,signal)=>simulateVoiceReply(3000,false,signal,()=>{}),speak:voiceTestSpeaker(true,async()=>assert.fail('no speech'),e=>events.push(e)),cancelSpeech(){},phase(){},transcript(){},error(){},wait:async()=>{}});
+ session.start();rec.onresult({results:[Object.assign([{transcript:'テスト'}],{isFinal:true})]});rec.onend();session.stop();t.mock.timers.tick(3000);await flush();assert.equal(created,1);assert.equal(events.length,0);assert.equal(session.phase,'idle');
 });

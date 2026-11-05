@@ -114,7 +114,7 @@ export class VoiceSession {
       this.watchdog = setTimeout(() => {
         if (!valid()) return;
         this.ports.diagnostic?.('recognition:no-results');
-        if (this.afterPlayback) this.pauseMic('読み上げ後の認識結果が届きません。「マイクを再開」を一度お試しください。改善しない場合は音声会話を終了してSafariのページを開き直してください。');
+        if (this.afterPlayback) this.pauseMic('次の認識結果が届きません。「マイクを再開」を一度お試しください。改善しない場合は音声会話を終了してSafariのページを開き直してください。');
         else this.recover(epoch);
       }, this.afterPlayback ? 10000 : 25000);
     };
