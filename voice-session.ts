@@ -4,6 +4,8 @@ export type Recognition = {
   onstart: null | (() => void);
   onresult: null | ((event: any) => void); onend: null | (() => void);
   onerror: null | ((event: { error: string }) => void);
+  onaudiostart?: null | (() => void); onaudioend?: null | (() => void);
+  onspeechstart?: null | (() => void);
   start(): void; stop(): void; abort(): void;
 };
 type Ports = {
@@ -26,6 +28,7 @@ export class VoiceSession {
   private pending = '';
   private finishCapture: (() => void) | null = null;
   private retries = 0;
+  private afterPlayback = false;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private ports: Ports;
   constructor(ports: Ports) { this.ports = ports; }
@@ -37,6 +40,7 @@ export class VoiceSession {
     const rec = this.rec; this.rec = null;
     if (rec) {
       rec.onstart = rec.onend = rec.onresult = rec.onerror = null;
+      rec.onaudiostart = rec.onaudioend = rec.onspeechstart = null;
       // stop/end alone may leave Safari's capture session attached across TTS.
       try { rec.abort(); } catch {}
     }
@@ -48,7 +52,7 @@ export class VoiceSession {
   stop() {
     ++this.epoch; this.release();
     this.aborter?.abort(); this.aborter = null;
-    this.pending = ''; this.ports.cancelSpeech(); this.set('idle');
+    this.pending = ''; this.afterPlayback = false; this.ports.cancelSpeech(); this.set('idle');
   }
   private fail(text: string) { this.stop(); this.ports.error(text); }
   private pauseMic(text: string) {
@@ -63,6 +67,7 @@ export class VoiceSession {
   }
   restartMicrophone() {
     if (!this.aborter || !['starting','listening','recovering','mic-paused'].includes(this.phase)) return;
+    this.ports.diagnostic?.('recognition:manual-restart');
     ++this.epoch; this.release(); this.retries = 0; this.ports.error('');
     // A user gesture provides a recovery route where Safari denies automatic start.
     this.listen(this.epoch);
@@ -101,11 +106,20 @@ export class VoiceSession {
       this.set('listening'); clearTimeout(this.watchdog);
       // Safari can fire start but never deliver a result/error/end after TTS.
       // Silence cannot be distinguished from that failure; retry capture only, never API.
-      this.watchdog = setTimeout(() => { if (valid()) this.recover(epoch); }, 25000);
+      this.watchdog = setTimeout(() => {
+        if (!valid()) return;
+        this.ports.diagnostic?.('recognition:no-results');
+        if (this.afterPlayback) this.pauseMic('読み上げ後の認識結果が届きません。「マイクを再開」を一度お試しください。改善しない場合は音声会話を終了してSafariのページを開き直してください。');
+        else this.recover(epoch);
+      }, this.afterPlayback ? 10000 : 25000);
     };
+    rec.onaudiostart = () => { if (valid()) this.ports.diagnostic?.('recognition:audio-start'); };
+    rec.onaudioend = () => { if (valid()) this.ports.diagnostic?.('recognition:audio-end'); };
+    rec.onspeechstart = () => { if (valid()) this.ports.diagnostic?.('recognition:speech-start'); };
     rec.onresult = event => {
       if (!valid()) return;
       this.ports.diagnostic?.('recognition:result');
+      this.afterPlayback = false;
       this.retries = 0; let interim = '';
       for (let i = 0; i < event.results.length; i++) {
         const result = event.results[i];
@@ -118,7 +132,8 @@ export class VoiceSession {
     };
     rec.onerror = event => {
       if (!valid()) return;
-      this.ports.diagnostic?.('recognition:error');
+      const code = ['not-allowed','service-not-allowed','audio-capture','no-speech','network','aborted'].includes(event.error) ? event.error : 'other';
+      this.ports.diagnostic?.(`recognition:error-${code}`);
       if ((closing || event.error === 'aborted') && (finals.size || manualFinish && draft.trim())) { submit(); return; }
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         this.pauseMic('マイクを再開できませんでした。Safariのマイク許可を確認し、「マイクを再開」を押してください。');
@@ -149,7 +164,7 @@ export class VoiceSession {
       return;
     }
     if (!this.current(epoch)) return;
-    this.pending = ''; this.ports.cancelSpeech(); this.set('recovering');
+    this.pending = ''; this.afterPlayback = true; this.ports.cancelSpeech(); this.set('recovering');
     await this.wait(1200);
     if (this.current(epoch)) this.listen(epoch);
   }

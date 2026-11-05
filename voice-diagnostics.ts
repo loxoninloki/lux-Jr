@@ -1,7 +1,7 @@
 const KEY='lux-next:voice-diagnostics:v1';
 const MAX=100;
-const eventPattern=/^(live|phase|recognition|dictation):[a-z0-9-]{1,70}$/;
-const linePattern=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z (live|phase|recognition|dictation):[a-z0-9-]{1,70}$/;
+const eventPattern=/^(live|phase|recognition|dictation|speech):[a-z0-9-]{1,70}$/;
+const linePattern=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z (live|phase|recognition|dictation|speech):[a-z0-9-]{1,70}$/;
 function clean(value:unknown):string[]{return Array.isArray(value)?value.filter((line):line is string=>typeof line==='string'&&linePattern.test(line)).slice(-MAX):[];}
 export function loadVoiceDiagnostics():string[]{try{return clean(JSON.parse(localStorage.getItem(KEY)||'[]'));}catch{return [];}}
 export function appendVoiceDiagnostic(lines:string[],event:string):string[]{
