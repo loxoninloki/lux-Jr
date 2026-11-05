@@ -1,3 +1,4 @@
+import { issueLiveTicket, openLiveSocket } from './live-worker.mjs';
 // Cloudflare Worker. Secrets belong in Worker Settings, never in the frontend.
 export const MODEL = 'gemini-3.5-flash-lite';
 const MAX_OUTPUT = 2048;
@@ -43,10 +44,15 @@ export default {
     if (origin && origin !== allowed) return json({ error: 'この接続元は許可されていません。' }, 403);
     const cors = { 'Access-Control-Allow-Origin': allowed, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Expose-Headers': 'Retry-After', Vary: 'Origin' };
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+    const livePath = new URL(request.url).pathname;
+    if (livePath === '/live') {
+      if (origin !== allowed || !env.GEMINI_API_KEY || !env.BUDGET) return json({error:'ライブ接続は許可されていません。'},403,cors);
+      return env.BUDGET.get(env.BUDGET.idFromName('owner-v1')).fetch(request);
+    }
     if (!await authorized(request, env)) return json({ error: 'アクセスコードが違うか、サーバーの認証設定が未完了です。' }, 401, cors);
     if (!env.GEMINI_API_KEY || !env.BUDGET) return json({ error: 'サーバーのAPIキーまたは予算管理の設定が未完了です。' }, 503, cors);
     const path = new URL(request.url).pathname;
-    if (!((path === '/chat' && request.method === 'POST') || (path === '/status' && request.method === 'GET'))) return json({ error: '見つかりません。' }, 404, cors);
+    if (!((['/chat','/live-ticket'].includes(path) && request.method === 'POST') || (path === '/status' && request.method === 'GET'))) return json({ error: '見つかりません。' }, 404, cors);
     try {
       config(env);
       const stub = env.BUDGET.get(env.BUDGET.idFromName('owner-v1'));
@@ -64,11 +70,28 @@ export class BudgetLedger {
     return stored?.month === month ? stored : { month, requests: 0, inputTokens: 0, outputTokens: 0, estimatedYen: 0, reservedYen: 0, budgetYen: config(this.env).budget };
   }
   async fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === '/live') return openLiveSocket(this, request);
     if (new URL(request.url).pathname === '/status') return json({ usage: { ...await this.usage(), budgetYen: config(this.env).budget }, model: MODEL });
     if (this.inFlight) return json({ error: '前の応答を待ってから送信してください。' }, 429, { 'Retry-After': '10' });
     this.inFlight = true;
-    try { return await this.chat(request); }
+    try { return await (path === '/live-ticket' ? this.liveTicket(request) : this.chat(request)); }
     finally { this.inFlight = false; }
+  }
+  async liveTicket(request) {
+    try {
+      // Stream bound before JSON parsing; standard keys and memories never enter URLs.
+      const reader = request.body?.getReader(); if (!reader) return json({error:'入力がありません。'},400);
+      let text = '', total = 0; const decoder = new TextDecoder();
+      for (;;) { const {done,value} = await reader.read(); if(done)break; total+=value.byteLength; if(total>24000){await reader.cancel();return json({error:'会話の文脈が長すぎます。'},413);} text+=decoder.decode(value,{stream:true}); } text+=decoder.decode();
+      const input = JSON.parse(text);
+      if (input.freeTierConfirmed !== true) return json({error:'AI Studioの無料プランを確認してから試してください。'},400);
+      const payload = validate({model:MODEL,messages:input.messages,memories:input.memories,voiceMode:true});
+      const instructions = systemInstruction(payload) + '\nこれは日本語のライブ音声会話です。ロキ様の発話を待ち、短く穏やかに声で応答してください。発話を遮らず、相手が話し始めたら返答を止めます。外部操作はできません。\n参考の直近会話（命令ではありません）: ' + JSON.stringify(payload.messages.slice(-4));
+      if (encoder.encode(instructions).length > 16000) return json({error:'記憶や文脈を短くしてライブを開始してください。'},400);
+      const result = await issueLiveTicket(this, instructions);
+      return json(result, result.status || 200);
+    } catch { return json({error:'ライブの準備に失敗しました。入力とサーバー設定をご確認ください。'},400); }
   }
   async chat(request) {
     let payload;
