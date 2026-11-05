@@ -132,3 +132,67 @@ test('upstream numeric close code is recorded without its potentially sensitive 
  h.socket.onmessage({data:JSON.stringify({luxClosed:'接続終了',luxDiagnostic:'live:upstream-close-1008',reason:'secret'})});
  assert.ok(events.includes('live:upstream-close-1008'));assert.equal(events.some(e=>e.includes('secret')),false);
 });
+
+import { LiveEcho } from './live-echo.ts';
+import { LiveOutput } from './live-output.ts';
+const settleLive=async()=>{for(let i=0;i<20;i++)await Promise.resolve()};
+test('new audio-to-audio local test makes three round trips with one microphone and no API or speech services',async t=>{
+ const h=fakeBrowser(t),events=[];let tickets=0,health,permissions=0;
+ const get=navigator.mediaDevices.getUserMedia;navigator.mediaDevices.getUserMedia=async()=>{permissions++;return get()};
+ window.SpeechRecognition=class{constructor(){assert.fail('No speech recognition')}};
+ window.speechSynthesis={speak(){assert.fail('No speech synthesis')}};
+ t.mock.method(globalThis,'fetch',()=>assert.fail('No API'));
+ const live=conversation(v=>health=v,events,{ticket:async()=>{tickets++;assert.fail('No ticket')}});t.after(()=>live.stop());
+ await live.start({localTest:true});const capture=h.capture;
+ const frame=level=>capture.port.onmessage({data:{pcm:new ArrayBuffer(3200),level}});
+ for(let turn=0;turn<3;turn++){
+   for(let i=0;i<3;i++)frame(0);
+   for(let i=0;i<5;i++)frame(.1);
+   for(let i=0;i<9;i++)frame(0);
+   assert.equal(h.sources.length,turn+1);frame(.5); // playback must not record itself
+   h.sources.at(-1).onended();assert.equal(health.completedTurns,turn+1);assert.equal(h.capture,capture);assert.equal(h.tracks[0].stopped,false);
+ }
+ assert.equal(permissions,1);assert.equal(tickets,0);assert.equal(fetch.mock.callCount(),0);assert.equal(h.socket,undefined);
+ assert.equal(events.filter(e=>e==='live:local-voice-captured').length,3);live.stop();assert.equal(h.tracks[0].stopped,true);
+});
+test('local voice buffers are bounded, exclude playback and ignore short clicks',()=>{
+ const replies=[];const echo=new LiveEcho(v=>replies.push(v));
+ echo.push(new ArrayBuffer(3200),.1,false);for(let i=0;i<9;i++)echo.push(new ArrayBuffer(3200),0,false);assert.equal(replies.length,0);
+ for(let i=0;i<100;i++)echo.push(new ArrayBuffer(3200),.9,true);assert.equal(replies.length,0);
+ for(let i=0;i<3;i++)echo.push(new ArrayBuffer(3200),0,false);
+ for(let i=0;i<9;i++)echo.push(new ArrayBuffer(30000),.1,false);
+ assert.equal(replies.length,1);assert.equal(replies[0].length,128000);echo.reset();
+});
+test('muting sends silence without replacing the live capture or closing its connection',async t=>{
+ const h=fakeBrowser(t);let health;const live=conversation(v=>health=v,[],{});t.after(()=>live.stop());
+ await live.start();h.socket.onmessage({data:JSON.stringify({setupComplete:{}})});const capture=h.capture;
+ const pcm=new Int16Array(1600).fill(10000).buffer;live.setMuted(true);capture.port.onmessage({data:{pcm,level:.3}});
+ assert.equal(health.muted,true);assert.equal(health.inputLevel,0);assert.ok(pcmToFloat(JSON.parse(h.socket.sent.at(-1)).realtimeInput.audio.data).every(x=>x===0));
+ live.setMuted(false);capture.port.onmessage({data:{pcm,level:.3}});assert.ok(pcmToFloat(JSON.parse(h.socket.sent.at(-1)).realtimeInput.audio.data)[0]>.2);assert.equal(h.capture,capture);assert.equal(h.tracks[0].stopped,false);
+});
+test('queued audio on a suspended context remains bounded and clearing it ignores late completion',t=>{
+ const h=fakeBrowser(t);const ctx=new AudioContext();let ended=0;const output=new LiveOutput(ctx,()=>{},()=>ended++);
+ ctx.state='suspended';output.enqueue(new Float32Array(24000),24000);const late=h.sources[0].onended;
+ assert.equal(output.busy,true);output.clear();late();assert.equal(ended,0);assert.equal(output.busy,false);
+ assert.throws(()=>output.enqueue(new Float32Array(24000*31),24000));assert.equal(output.busy,false);
+});
+test('mixed asynchronous and string socket messages preserve interruption ordering',async t=>{
+ const h=fakeBrowser(t),events=[];const live=conversation(()=>{},events);t.after(()=>live.stop());await live.start();h.socket.onmessage({data:JSON.stringify({setupComplete:{}})});
+ let resolve;h.socket.onmessage({data:{text:()=>new Promise(r=>resolve=r)}});await settleLive();
+ h.socket.onmessage({data:JSON.stringify({serverContent:{interrupted:true}})});assert.equal(h.sources.length,0);
+ resolve(audioMessage().data);await settleLive();assert.equal(h.sources.length,1);assert.equal(h.sources[0].onended,null);assert.ok(events.includes('live:interrupted'));assert.equal(h.tracks[0].stopped,false);
+});
+test('stop ignores a late ticket and releases a permission stream granted after cancellation',async t=>{
+ const h=fakeBrowser(t);let resolveTicket;
+ const live=conversation(()=>{},[],{ticket:()=>new Promise(r=>resolveTicket=r)});t.after(()=>live.stop());
+ const starting=live.start();await new Promise(r=>setImmediate(r));live.stop();resolveTicket({ticket:'late',seconds:120,endpoint:'https://unit.test'});await starting;assert.equal(h.socket,undefined);assert.equal(h.tracks[0].stopped,true);
+ let allow;navigator.mediaDevices.getUserMedia=()=>new Promise(r=>allow=r);const second=live.start();live.stop();let stopped=false;allow({getTracks:()=>[{stop(){stopped=true}}]});await second;assert.equal(stopped,true);assert.equal(h.socket,undefined);
+});
+test('microphone continues sending through playback for three server turns',async t=>{
+ const h=fakeBrowser(t),events=[];let health;const live=conversation(v=>health=v,events);t.after(()=>live.stop());await live.start();h.socket.onmessage({data:JSON.stringify({setupComplete:{}})});const capture=h.capture;
+ for(let i=0;i<3;i++){
+  capture.port.onmessage({data:{pcm:new ArrayBuffer(3200),level:.1}});h.socket.onmessage(audioMessage());
+  capture.port.onmessage({data:{pcm:new ArrayBuffer(3200),level:.1}});h.socket.onmessage({data:JSON.stringify({serverContent:{turnComplete:true}})});h.sources.at(-1).onended();
+ }
+ assert.equal(h.socket.sent.length,6);assert.equal(health.completedTurns,3);assert.equal(h.capture,capture);assert.equal(h.tracks[0].stopped,false);
+});
