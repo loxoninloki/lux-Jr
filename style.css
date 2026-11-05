@@ -23,3 +23,5 @@
 .live-health label { display: inline-flex; gap: .6rem; align-items: center; margin: 0 .8rem .2rem 0; }
 .live-health meter { width: 5rem; height: .5rem; accent-color: #c5b3d3; }
 .live-health .primary { margin-top: .35rem; }
+
+.dictation-status { color: #d5c0f2; font-size: 11px; line-height: 1.6; margin: 5px 0; }

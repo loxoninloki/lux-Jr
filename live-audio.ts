@@ -1,3 +1,4 @@
+import { deadline, startMicCapture } from './mic-capture.ts';
 import type { VoicePhase } from './voice-session.ts';
 export function pcmToFloat(data: string): Float32Array {
   const raw=atob(data);if(raw.length%2)throw Error('PCM');
@@ -17,10 +18,10 @@ type LivePorts = {
 };
 export class LiveConversation {
   private ports:LivePorts;private generation=0;private aborter:AbortController|null=null;
-  private context:AudioContext|null=null;private stream:MediaStream|null=null;private capture:AudioWorkletNode|null=null;private input:MediaStreamAudioSourceNode|null=null;
+  private context:AudioContext|null=null;private stream:MediaStream|null=null;private capture:{stop():void}|null=null;
   private socket:WebSocket|null=null;private ready=false;private nextPlay=0;private sources=new Set<AudioBufferSourceNode>();
   private handshake:ReturnType<typeof setTimeout>|undefined;private limit:ReturnType<typeof setTimeout>|undefined;
-  private userText='';private assistantText='';
+  private userText='';private assistantText='';private restoreAudioSession:(()=>void)|null=null;
   private health:LiveHealth={stage:'停止中',inputLevel:0,sentFrames:0,receivedChunks:0,needsResume:false};
   private monitor:ReturnType<typeof setInterval>|undefined;private rejectCapture:((reason:Error)=>void)|null=null;
   private report(stage=this.health.stage){this.health={...this.health,stage};this.ports.health?.({...this.health});}
@@ -36,8 +37,9 @@ export class LiveConversation {
     ++this.generation;this.ready=false;clearTimeout(this.handshake);clearTimeout(this.limit);this.aborter?.abort();this.aborter=null;
     if(this.socket){this.socket.onmessage=this.socket.onerror=this.socket.onclose=null;try{this.socket.close(1000,'User ended');}catch{}this.socket=null;}
     clearInterval(this.monitor);this.monitor=undefined;this.rejectCapture?.(new Error('音声準備を中止しました。'));this.rejectCapture=null;
-    if(this.capture){this.capture.port.onmessage=null;this.capture.onprocessorerror=null;this.capture.disconnect();this.capture=null;}this.input?.disconnect();this.input=null;
+    this.capture?.stop();this.capture=null;
     this.stream?.getTracks().forEach(track=>track.stop());this.stream=null;this.stopOutput();
+    this.restoreAudioSession?.();this.restoreAudioSession=null;
     if(this.context){this.context.onstatechange=null;void this.context.close().catch(()=>{});this.context=null;}this.flush();
     this.health.needsResume=false;this.health.inputLevel=0;this.report(message||'停止中');
     this.ports.phase('idle');this.ports.diagnostic('live:stopped');if(message)this.ports.error(message);
@@ -50,20 +52,22 @@ export class LiveConversation {
     this.health={stage:'マイクの許可を確認しています。',inputLevel:0,sentFrames:0,receivedChunks:0,needsResume:false};this.report();
     try {
       if(!navigator.mediaDevices?.getUserMedia||!window.AudioContext)throw Error('このブラウザではライブ音声を開始できません。Safariでお試しください。');
+      const session=(navigator as Navigator & {audioSession?:{type:string}}).audioSession;
+      if(session){const previous=session.type;try{session.type='play-and-record';this.restoreAudioSession=()=>{try{session.type=previous;}catch{}};}catch{}}
       // Construct/resume during the button gesture, before permission/network awaits.
       const context=new AudioContext();this.context=context;void context.resume().catch(()=>{});
-      const stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+      const permission=navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+      void permission.then(stream=>{if(!valid())stream.getTracks().forEach(track=>track.stop());},()=>{});
+      const stream=await deadline(permission,20000,'マイクの許可を確認できません。Safariのサイト設定でマイクを許可してから開始してください。');
       if(!valid()){stream.getTracks().forEach(t=>t.stop());return;}this.stream=stream;
       this.report('マイクの音声処理を読み込んでいます。');
-      if(!context.audioWorklet)throw Error('このSafariでは音声処理を読み込めません。iOSの更新をご確認ください。');
-      try{await context.audioWorklet.addModule(new URL('./live-processor.js',import.meta.url).href);}catch{throw Error('マイクの音声処理を読み込めません。ページを更新してお試しください。');}if(!valid())return;
-      const capture=new AudioWorkletNode(context,'lux-live-capture');this.capture=capture;
       let captured=false,lastFrame=Date.now(),lastReport=0;
+      let onFrame:(pcm:ArrayBuffer,level:number)=>void=()=>{};
       const firstFrame=new Promise<void>((resolve,reject)=>{
         this.rejectCapture=reject;
-        capture.port.onmessage=event=>{
-          if(!valid())return;const pcm=event.data?.pcm;if(!(pcm instanceof ArrayBuffer))return;
-          lastFrame=Date.now();this.health.inputLevel=Math.max(0,Math.min(1,Number(event.data.level)||0));
+        onFrame=(pcm,level)=>{
+          if(!valid())return;
+          lastFrame=Date.now();this.health.inputLevel=Math.max(0,Math.min(1,level||0));
           if(!captured){captured=true;this.rejectCapture=null;resolve();this.ports.diagnostic('live:microphone-frames');}
           if(this.ready&&this.socket?.readyState===WebSocket.OPEN&&context.state==='running'){
             if(this.socket.bufferedAmount>128000){this.stop('通信が追いつかないためライブを終了しました。');return;}
@@ -73,9 +77,8 @@ export class LiveConversation {
           if(Date.now()-lastReport>500){lastReport=Date.now();this.report();}
         };
       });
-      capture.onprocessorerror=()=>{if(valid())this.stop('マイクの音声処理が停止しました。終了してページを更新してください。');};
-      capture.port.start?.();
-      this.input=context.createMediaStreamSource(stream);this.input.connect(capture);capture.connect(context.destination);
+      const capture=await startMicCapture(context,stream,(pcm,level)=>onFrame(pcm,level),event=>{this.ports.diagnostic(event);if(event==='live:capture-compatibility')this.report('予備のマイク処理で音声を確認しています。');},signal);
+      if(!valid()){capture.stop();return;}this.capture=capture;
       const updateAudioState=()=>{if(!valid())return;this.health.needsResume=context.state!=='running';this.ports.diagnostic(`live:audio-${context.state}`);this.report(this.health.needsResume?'音声が一時停止中です。「音声を有効にする」を押してください。':this.ready?'接続済み。お話しください。':'マイクの音声を確認しています。');};
       context.onstatechange=updateAudioState;
       // Microphone permission/routing can interrupt Safari's earlier resume.
