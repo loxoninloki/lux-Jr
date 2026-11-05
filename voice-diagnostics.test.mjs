@@ -1,0 +1,6 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {loadVoiceDiagnostics,appendVoiceDiagnostic,clearVoiceDiagnostics} from './voice-diagnostics.ts';
+function storage(t){const original=Object.getOwnPropertyDescriptor(globalThis,'localStorage');const values=new Map();Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)}});t.after(()=>{if(original)Object.defineProperty(globalThis,'localStorage',original);else delete globalThis.localStorage;});return values;}
+test('voice diagnostics survive reload and keep only the last 100 metadata events',t=>{storage(t);let events=[];for(let i=0;i<110;i++)events=appendVoiceDiagnostic(events,`live:ticket-http-${i}`);assert.equal(events.length,100);assert.deepEqual(loadVoiceDiagnostics(),events);clearVoiceDiagnostics();assert.deepEqual(loadVoiceDiagnostics(),[]);});
+test('voice diagnostics reject arbitrary text, URLs, tokens and conversation content',t=>{storage(t);for(const value of ['hello','Bearer secret','live:https://example.test/key','live:こんにちは','live:ready secret'])assert.deepEqual(appendVoiceDiagnostic([],value),[]);assert.deepEqual(loadVoiceDiagnostics(),[]);});

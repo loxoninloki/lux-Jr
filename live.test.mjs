@@ -13,12 +13,12 @@ test('live model and audio-only setup are fixed; client controls cannot set the 
  assert.doesNotThrow(()=>validateLiveAudio(JSON.stringify({realtimeInput:{audio:{data:'AAA=',mimeType:'audio/pcm;rate=16000'}}})));
  for(const data of [{setup:{model:'other'}},{realtimeInput:{text:'inject'}},{realtimeInput:{audio:{data:'AA==',mimeType:'audio/pcm;rate=16000'}}}])assert.throws(()=>validateLiveAudio(JSON.stringify(data)));
 });
-test('trial tickets reserve app budget, prevent simultaneous trials, and limit daily starts',async()=>{
- const l=ledger();const first=await issueLiveTicket(l,'persona');assert.equal(first.seconds,120);assert.equal(first.remainingToday,2);assert.equal((await l.usage()).reservedYen,100);
+test('trial tickets reserve app budget and prevent simultaneous trials without a daily count cap',async()=>{
+ const l=ledger();const first=await issueLiveTicket(l,'persona');assert.equal(first.seconds,120);assert.equal(first.remainingToday,undefined);assert.equal((await l.usage()).reservedYen,100);
  assert.equal((await issueLiveTicket(l,'persona')).status,429);
- for(let i=0;i<2;i++){l.values.get('live-trial').activeUntil=0;assert.ok((await issueLiveTicket(l,'persona')).ticket);}
- l.values.get('live-trial').activeUntil=0;assert.equal((await issueLiveTicket(l,'persona')).status,429);
- assert.equal((await l.usage()).reservedYen,300);
+ for(let i=0;i<4;i++){l.values.get('live-trial').activeUntil=0;assert.ok((await issueLiveTicket(l,'persona')).ticket);}
+ assert.equal(l.values.get('live-trial').count,5);
+ assert.equal((await l.usage()).reservedYen,500);
 });
 test('monthly app cap rejects live before issuing a ticket',async()=>{
  const l=ledger(50);assert.equal((await issueLiveTicket(l,'persona')).status,429);assert.equal(l.values.has('live-ticket'),false);

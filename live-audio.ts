@@ -34,6 +34,7 @@ export class LiveConversation {
   }
   constructor(ports:LivePorts){this.ports=ports;}
   stop(message='') {
+    if(message)this.ports.diagnostic(this.ready?'live:ended-after-ready':'live:ended-before-ready');
     ++this.generation;this.ready=false;clearTimeout(this.handshake);clearTimeout(this.limit);this.aborter?.abort();this.aborter=null;
     if(this.socket){this.socket.onmessage=this.socket.onerror=this.socket.onclose=null;try{this.socket.close(1000,'User ended');}catch{}this.socket=null;}
     clearInterval(this.monitor);this.monitor=undefined;this.rejectCapture?.(new Error('音声準備を中止しました。'));this.rejectCapture=null;
@@ -71,7 +72,7 @@ export class LiveConversation {
           if(!captured){captured=true;this.rejectCapture=null;resolve();this.ports.diagnostic('live:microphone-frames');}
           if(this.ready&&this.socket?.readyState===WebSocket.OPEN&&context.state==='running'){
             if(this.socket.bufferedAmount>128000){this.stop('通信が追いつかないためライブを終了しました。');return;}
-            try{this.socket.send(JSON.stringify({realtimeInput:{audio:{mimeType:'audio/pcm;rate=16000',data:audioBase64(pcm)}}}));this.health.sentFrames++;}
+            try{this.socket.send(JSON.stringify({realtimeInput:{audio:{mimeType:'audio/pcm;rate=16000',data:audioBase64(pcm)}}}));this.health.sentFrames++;if(this.health.sentFrames===1)this.ports.diagnostic('live:audio-sent');}
             catch{this.stop('マイク音声を送信できませんでした。');return;}
           }
           if(Date.now()-lastReport>500){lastReport=Date.now();this.report();}
@@ -108,7 +109,7 @@ export class LiveConversation {
           if(content.interrupted){this.stopOutput();this.flush();this.ports.phase('listening');this.ports.diagnostic('live:interrupted');}
           if(content.inputTranscription?.text){this.userText=(this.userText+content.inputTranscription.text).slice(0,4000);this.ports.preview(this.userText);this.report('声が認識されました。');}
           if(content.outputTranscription?.text)this.assistantText=(this.assistantText+content.outputTranscription.text).slice(0,4000);
-          for(const part of content.modelTurn?.parts||[]){const audio=part.inlineData;if(audio?.data&&audio.mimeType?.startsWith('audio/pcm')){this.health.receivedChunks++;this.play(audio.data,audio.mimeType);this.report(this.health.needsResume?'返答音声が届きました。「音声を有効にする」を押してください。':'ルクスの返答音声を再生しています。');}}
+          for(const part of content.modelTurn?.parts||[]){const audio=part.inlineData;if(audio?.data&&audio.mimeType?.startsWith('audio/pcm')){this.health.receivedChunks++;if(this.health.receivedChunks===1)this.ports.diagnostic('live:audio-received');this.play(audio.data,audio.mimeType);this.report(this.health.needsResume?'返答音声が届きました。「音声を有効にする」を押してください。':'ルクスの返答音声を再生しています。');}}
           if(content.turnComplete){this.flush();if(!this.sources.size)this.ports.phase('listening');this.ports.diagnostic('live:turn-complete');}
         } catch {this.stop('ライブ音声の処理に失敗しました。開始し直してください。');}
       };

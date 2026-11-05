@@ -1,7 +1,6 @@
 // Fixed model and trial limits. No API keys, instructions or setup controls reach clients.
 export const LIVE_MODEL = 'gemini-3.8-live';
 export const LIVE_SECONDS = 120;
-export const LIVE_DAILY = 3;
 export const LIVE_RESERVE_YEN = 100; // App-side conservative reservation, not an invoice.
 export function liveSetup(instructions) {
   return { setup: { model: `models/${LIVE_MODEL}`,
@@ -27,7 +26,6 @@ export async function issueLiveTicket(ledger, instructions) {
     const previous = await tx.get('live-trial');
     const record = previous?.day === day ? previous : { day, count: 0, activeUntil: 0 };
     if (record.activeUntil > now) return { error:'前のライブ接続が終了してから、2分ほど待ってお試しください。', status:429 };
-    if (record.count >= LIVE_DAILY) return { error:'本日のLUXライブ試用は3回までです。明日またお試しください。', status:429 };
     const savedUsage = await tx.get('usage');
     const usage = savedUsage?.month === baseUsage.month ? savedUsage : baseUsage;
     if (usage.reservedYen + LIVE_RESERVE_YEN > Number(ledger.env.MONTHLY_BUDGET_YEN || 1000)) return { error:'アプリの月間予算上限です。設定で利用量をご確認ください。', status:429 };
@@ -36,7 +34,7 @@ export async function issueLiveTicket(ledger, instructions) {
     usage.reservedYen += LIVE_RESERVE_YEN; usage.liveSessions = (usage.liveSessions || 0) + 1;
     // Only one outstanding ticket, consumed before opening the upstream connection.
     await tx.put({ 'live-trial':record, 'live-ticket':{ ticket, expires:now+20000, instructions }, usage });
-    return { ticket, seconds:LIVE_SECONDS, remainingToday:LIVE_DAILY-record.count, model:LIVE_MODEL, usage };
+    return { ticket, seconds:LIVE_SECONDS, model:LIVE_MODEL, usage };
   });
 }
 export async function openLiveSocket(ledger, request) {
