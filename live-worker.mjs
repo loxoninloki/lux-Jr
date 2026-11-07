@@ -10,7 +10,13 @@ export function liveSetup(instructions) {
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } },
     systemInstruction: { parts: [{ text: instructions }] },
     inputAudioTranscription: {}, outputAudioTranscription: {},
-    realtimeInputConfig: { automaticActivityDetection: { disabled: false, silenceDurationMs: 900, prefixPaddingMs: 300 }, activityHandling: 'START_OF_ACTIVITY_INTERRUPTS' },
+    // Keep natural barge-in, but reduce false starts from speaker bleed or brief
+    // background noise. Lower start sensitivity and require a little more speech
+    // evidence before Gemini interrupts a response.
+    realtimeInputConfig: { automaticActivityDetection: {
+      disabled: false, startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+      silenceDurationMs: 900, prefixPaddingMs: 450
+    }, activityHandling: 'START_OF_ACTIVITY_INTERRUPTS' },
   } };
 }
 export function validateLiveAudio(raw) {

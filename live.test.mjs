@@ -10,6 +10,11 @@ function ledger(budget=1000){
 }
 test('live model and audio-only setup are fixed; client controls cannot set the model',()=>{
  const setup=liveSetup('test persona').setup;assert.equal(setup.model,`models/${LIVE_MODEL}`);assert.deepEqual(setup.generationConfig.responseModalities,['AUDIO']);assert.equal(setup.realtimeInputConfig.activityHandling,'START_OF_ACTIVITY_INTERRUPTS');
+ const vad=setup.realtimeInputConfig.automaticActivityDetection;
+ assert.equal(vad.disabled,false);
+ assert.equal(vad.startOfSpeechSensitivity,'START_SENSITIVITY_LOW');
+ assert.equal(vad.prefixPaddingMs,450);
+ assert.equal(vad.silenceDurationMs,900);
  assert.doesNotThrow(()=>validateLiveAudio(JSON.stringify({realtimeInput:{audio:{data:'AAA=',mimeType:'audio/pcm;rate=16000'}}})));
  for(const data of [{setup:{model:'other'}},{realtimeInput:{text:'inject'}},{realtimeInput:{audio:{data:'AA==',mimeType:'audio/pcm;rate=16000'}}}])assert.throws(()=>validateLiveAudio(JSON.stringify(data)));
 });
