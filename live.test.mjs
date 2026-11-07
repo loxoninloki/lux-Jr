@@ -137,6 +137,15 @@ test('Cloudflare Blob upstream messages are decoded in order before text frames'
  assert.equal(replies[1].serverContent.turnComplete,true);
  assert.equal(pair[1].closed,undefined);
 });
+test('failed upstream Live handshake releases the active-session lock',async t=>{
+ t.mock.method(globalThis,'fetch',async()=>({webSocket:null}));
+ const l=ledger();l.env.GEMINI_API_KEY='unit-test-only';
+ const ticket=await issueLiveTicket(l,'persona');
+ const response=await openLiveSocket(l,new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}}));
+ assert.equal(response.status,503);
+ l.values.get('live-trial').activeUntil=0;
+ assert.ok((await issueLiveTicket(l,'persona')).ticket);
+});
 test('native Live keeps the microphone open through playback and clears queued audio on interruption',async(t)=>{
  const {LiveConversation}=await import('./live-audio.ts');const names=['window','AudioContext','AudioWorkletNode','WebSocket','navigator'];const originals=new Map(names.map(n=>[n,Object.getOwnPropertyDescriptor(globalThis,n)]));
  const tracks=[{stopped:false,stop(){this.stopped=true}}],sources=[];let socket,capture;
