@@ -78,6 +78,38 @@ test('server consumes tickets once and force-closes both sockets after 120 secon
  assert.equal((await openLiveSocket(l,request)).status,401);
 });
 
+test('Gemini Live distinguishes malformed upstream responses without leaking audio',async t=>{
+ class Socket extends EventTarget {sent=[];accept(){}send(value){this.sent.push(value)}close(){this.closed=true}}
+ const upstream=new Socket();let pair;
+ const oldResponse=globalThis.Response,oldPair=globalThis.WebSocketPair;
+ globalThis.Response=class{constructor(body,options){this.status=options.status;this.webSocket=options.webSocket}};
+ globalThis.WebSocketPair=class{constructor(){this[0]=new Socket();this[1]=new Socket();pair=this}};
+ t.mock.method(globalThis,'fetch',async()=>({webSocket:upstream}));
+ t.after(()=>{globalThis.Response=oldResponse;globalThis.WebSocketPair=oldPair});
+ const l=ledger();l.env.GEMINI_API_KEY='unit-test-only';
+ const ticket=await issueLiveTicket(l,'persona');
+ await openLiveSocket(l,new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}}));
+ upstream.dispatchEvent(new MessageEvent('message',{data:'{not json secret-audio'}));
+ const result=JSON.parse(pair[1].sent.at(-1));
+ assert.equal(result.luxDiagnostic,'live:upstream-invalid-json');
+ assert.equal(result.luxClosed.includes('secret-audio'),false);
+});
+test('Gemini Live forwards binary JSON frames',async t=>{
+ class Socket extends EventTarget {sent=[];accept(){}send(value){this.sent.push(value)}close(){this.closed=true}}
+ const upstream=new Socket();let pair;
+ const oldResponse=globalThis.Response,oldPair=globalThis.WebSocketPair;
+ globalThis.Response=class{constructor(body,options){this.status=options.status;this.webSocket=options.webSocket}};
+ globalThis.WebSocketPair=class{constructor(){this[0]=new Socket();this[1]=new Socket();pair=this}};
+ t.mock.method(globalThis,'fetch',async()=>({webSocket:upstream}));
+ t.after(()=>{globalThis.Response=oldResponse;globalThis.WebSocketPair=oldPair});
+ const l=ledger();l.env.GEMINI_API_KEY='unit-test-only';
+ const ticket=await issueLiveTicket(l,'persona');
+ await openLiveSocket(l,new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}}));
+ const encoded=new TextEncoder().encode(JSON.stringify({setupComplete:{}}));
+ upstream.dispatchEvent(new MessageEvent('message',{data:encoded.buffer}));
+ assert.equal(JSON.parse(pair[1].sent.at(-1)).setupComplete !== undefined,true);
+ assert.notEqual(pair[1].closed,true);
+});
 test('native Live keeps the microphone open through playback and clears queued audio on interruption',async(t)=>{
  const {LiveConversation}=await import('./live-audio.ts');const names=['window','AudioContext','AudioWorkletNode','WebSocket','navigator'];const originals=new Map(names.map(n=>[n,Object.getOwnPropertyDescriptor(globalThis,n)]));
  const tracks=[{stopped:false,stop(){this.stopped=true}}],sources=[];let socket,capture;
