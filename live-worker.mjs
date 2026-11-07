@@ -88,18 +88,29 @@ export async function openLiveSocket(ledger, request) {
   });
   upstream.addEventListener('message', event => {
     if (closed) return;
+    // WebSocket servers may deliver either text or binary frames. Never echo the
+    // original frame or an exception to diagnostics: Live data can contain speech.
+    let value;
     try {
-      const value = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data));
-      if (value.setupComplete) { ready=true; clearTimeout(handshake); }
-      if (value.error) {
-        const code = Number(value.error.code);
-        const label = [400,401,403,404,429,500,503].includes(code) ? `（${code}）` : '';
-        close(`Gemini Liveが接続を拒否しました${label}。無料枠・モデルの利用権限をご確認ください。`,[400,401,403,404,429,500,503].includes(code)?`live:upstream-error-${code}`:'live:upstream-error'); return;
-      }
-      server.send(JSON.stringify(value));
-      if (value.serverContent?.turnComplete && ++turns >= 12) close('今回の試用は12往復までです。');
-      if (value.goAway) close('Geminiが接続を終了しました。再開には開始ボタンを押してください。');
-    } catch { close('音声応答を受信できませんでした。'); }
+      if (typeof event.data === 'string') value = JSON.parse(event.data);
+      else if (event.data instanceof ArrayBuffer || ArrayBuffer.isView(event.data))
+        value = JSON.parse(new TextDecoder().decode(event.data));
+      else { close('Gemini Liveから未対応の形式を受信しました。', 'live:upstream-unsupported-frame'); return; }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('invalid response');
+    } catch {
+      close('Gemini Liveの応答形式を解析できませんでした。', 'live:upstream-invalid-json');
+      return;
+    }
+    if (value.setupComplete) { ready = true; clearTimeout(handshake); }
+    if (value.error) {
+      const code = Number(value.error.code);
+      const label = [400,401,403,404,429,500,503].includes(code) ? `（${code}）` : '';
+      close(`Gemini Liveが接続を拒否しました${label}。無料枠・モデルの利用権限をご確認ください。`,[400,401,403,404,429,500,503].includes(code)?`live:upstream-error-${code}`:'live:upstream-error'); return;
+    }
+    try { server.send(JSON.stringify(value)); }
+    catch { close('音声データの転送に失敗しました。', 'live:client-forward-failed'); return; }
+    if (value.serverContent?.turnComplete && ++turns >= 12) close('今回の試用は12往復までです。');
+    if (value.goAway) close('Geminiが接続を終了しました。再開には開始ボタンを押してください。');
   });
   server.addEventListener('close',()=>close());server.addEventListener('error',()=>close('端末との接続が切れました。'));
   upstream.addEventListener('close',event=>{
