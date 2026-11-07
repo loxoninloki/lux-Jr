@@ -110,6 +110,26 @@ test('Gemini Live forwards binary JSON frames',async t=>{
  assert.equal(JSON.parse(pair[1].sent.at(-1)).setupComplete !== undefined,true);
  assert.notEqual(pair[1].closed,true);
 });
+test('Cloudflare Blob upstream messages are decoded in order before text frames',async t=>{
+ class Socket extends EventTarget {sent=[];accept(){}send(value){this.sent.push(value)}close(){this.closed=true}}
+ const upstream=new Socket();let pair;
+ const oldResponse=globalThis.Response,oldPair=globalThis.WebSocketPair;
+ globalThis.Response=class{constructor(body,options){this.status=options.status;this.webSocket=options.webSocket}};
+ globalThis.WebSocketPair=class{constructor(){this[0]=new Socket();this[1]=new Socket();pair=this}};
+ t.mock.method(globalThis,'fetch',async()=>({webSocket:upstream}));
+ t.after(()=>{globalThis.Response=oldResponse;globalThis.WebSocketPair=oldPair});
+ const l=ledger();l.env.GEMINI_API_KEY='unit-test-only';
+ const ticket=await issueLiveTicket(l,'persona');
+ await openLiveSocket(l,new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}}));
+ const first=new Blob([JSON.stringify({setupComplete:{}})],{type:'application/json'});
+ upstream.dispatchEvent(new MessageEvent('message',{data:first}));
+ upstream.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({serverContent:{turnComplete:true}})}));
+ for(let i=0;i<20;i++)await new Promise(resolve=>setImmediate(resolve));
+ const replies=pair[1].sent.map(v=>JSON.parse(v));
+ assert.ok(replies[0].setupComplete);
+ assert.equal(replies[1].serverContent.turnComplete,true);
+ assert.equal(pair[1].closed,undefined);
+});
 test('native Live keeps the microphone open through playback and clears queued audio on interruption',async(t)=>{
  const {LiveConversation}=await import('./live-audio.ts');const names=['window','AudioContext','AudioWorkletNode','WebSocket','navigator'];const originals=new Map(names.map(n=>[n,Object.getOwnPropertyDescriptor(globalThis,n)]));
  const tracks=[{stopped:false,stop(){this.stopped=true}}],sources=[];let socket,capture;
