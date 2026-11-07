@@ -33,6 +33,7 @@ export class VoiceSession {
   private retries = 0;
   private afterPlayback = false;
   private needsPlaybackGesture = false;
+  private playbackRetries = 0;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private ports: Ports;
   constructor(ports: Ports) { this.ports = ports; }
@@ -52,12 +53,13 @@ export class VoiceSession {
   start() {
     this.stop(); this.retries = 0; this.ports.error(''); this.aborter = new AbortController();
     this.needsPlaybackGesture = !!this.ports.preferPlaybackGesture;
+    this.playbackRetries = 0;
     this.listen(this.epoch);
   }
   stop() {
     ++this.epoch; this.release();
     this.aborter?.abort(); this.aborter = null;
-    this.pending = ''; this.afterPlayback = false; this.ports.cancelSpeech(); this.set('idle');
+    this.pending = ''; this.afterPlayback = false; this.playbackRetries = 0; this.ports.cancelSpeech(); this.set('idle');
   }
   private fail(text: string) { this.stop(); this.ports.error(text); }
   private pauseMic(text: string) {
@@ -155,7 +157,7 @@ export class VoiceSession {
     try {
       const reply = await this.ports.request(text, this.aborter!.signal);
       if (!this.current(epoch)) return;
-      this.pending = reply; await this.play(epoch);
+      this.pending = reply; this.playbackRetries = 0; await this.play(epoch);
     } catch (error) {
       if (this.current(epoch)) this.fail(error instanceof Error ? error.message : '通信できませんでした。音声会話を終了しました。');
     }
@@ -171,6 +173,15 @@ export class VoiceSession {
     catch (error) {
       if (this.current(epoch)) {
         const gestureBlocked = !!error && typeof error==='object' && 'code' in error && ['speech-start-timeout','speech-not-allowed'].includes(String(error.code));
+        // Safari can silently fail to start speechSynthesis after microphone
+        // capture. Retry once automatically before requiring a user gesture.
+        if (gestureBlocked && !fromGesture && !this.needsPlaybackGesture && this.playbackRetries++ === 0) {
+          this.ports.diagnostic?.('speech:auto-retry');
+          this.set('recovering');
+          await this.wait(500);
+          if (this.current(epoch)) await this.play(epoch);
+          return;
+        }
         if (gestureBlocked) { this.needsPlaybackGesture=true; this.ports.playbackGestureRequired?.(); this.ports.diagnostic?.('speech:gesture-required'); }
         this.set('paused'); this.ports.error(gestureBlocked?'自動再生の開始を確認できません。「返答を再生して続ける」を押してください。以降のお返事もボタンで再生します。':'音声を再生できませんでした。「返答を再生して続ける」を押してください。');
       }
