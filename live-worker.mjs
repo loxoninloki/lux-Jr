@@ -28,12 +28,26 @@ export async function issueLiveTicket(ledger, instructions) {
     if (record.activeUntil > now) return { error:'前のライブ接続が終了してから、2分ほど待ってお試しください。', status:429 };
     const savedUsage = await tx.get('usage');
     const usage = savedUsage?.month === baseUsage.month ? savedUsage : baseUsage;
-    if (usage.reservedYen + LIVE_RESERVE_YEN > Number(ledger.env.MONTHLY_BUDGET_YEN || 1000)) return { error:'アプリの月間予算上限です。設定で利用量をご確認ください。', status:429 };
+    // A ticket that expired without ever opening a WebSocket cannot incur Live usage.
+    // Reclaim only that unused reservation; never reclaim a consumed ticket or a
+    // connected session, whose provider usage cannot be established here.
+    const pending = await tx.get('live-ticket');
+    if (pending && pending.expires < now) {
+      if (pending.month === usage.month && pending.reservedYen === LIVE_RESERVE_YEN) {
+        usage.reservedYen = Math.max(0, usage.reservedYen - LIVE_RESERVE_YEN);
+        usage.unusedLiveTickets = (usage.unusedLiveTickets || 0) + 1;
+      }
+      await tx.delete('live-ticket');
+    }
+    if (usage.reservedYen + LIVE_RESERVE_YEN > Number(ledger.env.MONTHLY_BUDGET_YEN || 1000)) {
+      await tx.put('usage', usage);
+      return { error:'アプリの月間予算上限です。設定で利用量をご確認ください。', status:429 };
+    }
     const ticket = crypto.randomUUID();
     record.count++; record.activeUntil = now + (LIVE_SECONDS + 20) * 1000;
     usage.reservedYen += LIVE_RESERVE_YEN; usage.liveSessions = (usage.liveSessions || 0) + 1;
     // Only one outstanding ticket, consumed before opening the upstream connection.
-    await tx.put({ 'live-trial':record, 'live-ticket':{ ticket, expires:now+20000, instructions }, usage });
+    await tx.put({ 'live-trial':record, 'live-ticket':{ ticket, expires:now+20000, instructions, month:usage.month, reservedYen:LIVE_RESERVE_YEN }, usage });
     return { ticket, seconds:LIVE_SECONDS, model:LIVE_MODEL, usage };
   });
 }
