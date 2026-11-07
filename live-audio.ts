@@ -1,6 +1,7 @@
 import { deadline, startMicCapture } from './mic-capture.ts';
 import { LiveOutput, pcmToFloat, audioBase64 } from './live-output.ts';
 import { LiveEcho } from './live-echo.ts';
+import { extractLiveGrounding, type LiveGrounding } from './live-grounding.ts';
 import type { VoicePhase } from './voice-session.ts';
 export { pcmToFloat, audioBase64 } from './live-output.ts';
 export type LiveHealth = {
@@ -12,6 +13,7 @@ type LivePorts = {
   transcript(user: string, assistant: string): void; preview(text: string): void;
   ticket(signal: AbortSignal): Promise<{ticket: string; seconds: number | null; endpoint: string}>;
   health?(value: LiveHealth): void;
+  grounding?(value: LiveGrounding): void;
 };
 const idleHealth = (): LiveHealth => ({stage: '停止中', inputLevel: 0, sentFrames: 0, receivedChunks: 0, needsResume: false, muted: false, localTest: false, completedTurns: 0});
 
@@ -235,6 +237,8 @@ export class LiveConversation {
     } catch { this.stop('マイク音声を送信できませんでした。'); }
   }
   private message(value: any) {
+    const grounding = extractLiveGrounding(value);
+    if (grounding) { this.ports.grounding?.(grounding); this.ports.diagnostic('live:search-grounded'); }
     if (value.luxClosed) {
       if (/^live:(upstream-close-[0-9]{4}|upstream-error-(400|401|403|404|429|500|503)|upstream-(error|model-rejected|config-rejected|quota|access-denied)|setup-timeout)$/.test(value.luxDiagnostic)) this.ports.diagnostic(value.luxDiagnostic);
       this.stop(String(value.luxClosed)); return;
