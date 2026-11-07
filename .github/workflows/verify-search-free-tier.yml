@@ -1,0 +1,29 @@
+name: Phase 0 - Verify free-tier Gemini Search (manual only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      free_tier_confirmed:
+        description: 'I confirmed AI Studio Free Tier and current Gemini 2.5 Flash-Lite grounding pricing'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ inputs.free_tier_confirmed == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify Google Search grounding without exposing the API key
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CONFIRMED_FREE_TIER: 'true'
+        run: node scripts/verify-search-free-tier.mjs
