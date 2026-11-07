@@ -123,10 +123,22 @@ export async function openLiveSocket(ledger, request) {
     if (value.serverContent?.turnComplete && ++turns >= 12) close('今回の試用は12往復までです。');
     if (value.goAway) close('Geminiが接続を終了しました。再開には開始ボタンを押してください。');
   }
+  let queuedFrames = 0;
   upstream.addEventListener('message', event => {
-    upstreamMessages = upstreamMessages.then(() => forwardUpstream(event.data)).catch(() => {
+    const data = event.data;
+    // Normal text and ArrayBuffer frames retain synchronous forwarding.
+    // When a Blob is being decoded, subsequent messages wait for it.
+    const isBlob = typeof Blob !== 'undefined' && data instanceof Blob;
+    if (!queuedFrames && !isBlob) {
+      void forwardUpstream(data).catch(() => {
+        if (!closed) close('音声応答の処理を続けられませんでした。', 'live:upstream-processing-failed');
+      });
+      return;
+    }
+    queuedFrames++;
+    upstreamMessages = upstreamMessages.then(() => forwardUpstream(data)).catch(() => {
       if (!closed) close('音声応答の処理を続けられませんでした。', 'live:upstream-processing-failed');
-    });
+    }).finally(() => { queuedFrames--; });
   });
   server.addEventListener('close',()=>close());server.addEventListener('error',()=>close('端末との接続が切れました。'));
   upstream.addEventListener('close',event=>{
