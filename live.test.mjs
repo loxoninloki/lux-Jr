@@ -14,7 +14,7 @@ test('live model and audio-only setup are fixed; client controls cannot set the 
  for(const data of [{setup:{model:'other'}},{realtimeInput:{text:'inject'}},{realtimeInput:{audio:{data:'AA==',mimeType:'audio/pcm;rate=16000'}}}])assert.throws(()=>validateLiveAudio(JSON.stringify(data)));
 });
 test('trial tickets reserve app budget and prevent simultaneous trials without a daily count cap',async()=>{
- const l=ledger();const first=await issueLiveTicket(l,'persona');assert.equal(first.seconds,120);assert.equal(first.remainingToday,undefined);assert.equal((await l.usage()).reservedYen,100);
+ const l=ledger();const first=await issueLiveTicket(l,'persona');assert.equal(first.seconds,null);assert.equal(first.remainingToday,undefined);assert.equal((await l.usage()).reservedYen,100);
  assert.equal((await issueLiveTicket(l,'persona')).status,429);
  for(let i=0;i<4;i++){l.values.get('live-trial').activeUntil=0;assert.ok((await issueLiveTicket(l,'persona')).ticket);}
  assert.equal(l.values.get('live-trial').count,5);
@@ -63,7 +63,7 @@ test('audio worklet streams 16 kHz mono from both iPhone sample rates and never 
  }
 });
 
-test('server consumes tickets once and force-closes both sockets after 120 seconds',async(t)=>{
+test('server keeps Live sockets open after 120 seconds and prevents parallel sessions',async(t)=>{
  t.mock.timers.enable({apis:['setTimeout']});
  class Socket extends EventTarget {sent=[];closed=false;accept(){}send(value){this.sent.push(value)}close(){this.closed=true;this.dispatchEvent(new Event('close'))}}
  const upstream=new Socket();let pair;const originalResponse=globalThis.Response,originalPair=globalThis.WebSocketPair;
@@ -74,8 +74,15 @@ test('server consumes tickets once and force-closes both sockets after 120 secon
  const request=new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}});
  const response=await openLiveSocket(l,request);assert.equal(response.status,101);assert.equal(l.values.has('live-ticket'),false);
  upstream.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({setupComplete:{}})}));
- t.mock.timers.tick(120000);assert.equal(pair[1].closed,true);assert.equal(upstream.closed,true);
+ t.mock.timers.tick(121000);assert.equal(pair[1].closed,false);assert.equal(upstream.closed,false);
+ for(let i=0;i<15;i++)upstream.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({serverContent:{turnComplete:true}})}));
+ assert.equal(pair[1].closed,false);assert.equal(upstream.closed,false);
+ l.values.get('live-trial').activeUntil=0;
+ assert.equal((await issueLiveTicket(l,'persona')).status,429); // active connection lock
+ assert.equal((await openLiveSocket(l,request)).status,409); // locked (and one-use)
+ pair[1].dispatchEvent(new Event('close'));assert.equal(upstream.closed,true);
  assert.equal((await openLiveSocket(l,request)).status,401);
+ assert.ok((await issueLiveTicket(l,'persona')).ticket);
 });
 
 test('Gemini Live distinguishes malformed upstream responses without leaking audio',async t=>{
