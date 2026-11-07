@@ -17,6 +17,7 @@ export function validate(payload) {
   if (encoder.encode(JSON.stringify(payload)).length > 24000) throw Error('会話が長くなりました。履歴をエクスポート後に会話を消去するか、記憶を短くしてください。');
   return payload;
 }
+export function appBudgetEnabled(env) { return env.DISABLE_APP_BUDGET_CAP !== 'true'; }
 export function config(env) {
   const budget = Number(env.MONTHLY_BUDGET_YEN || 1000), rate = Number(env.USD_JPY || 150);
   if (!Number.isFinite(budget) || budget <= 0 || budget > 2000 || !Number.isFinite(rate) || rate < 50 || rate > 500) throw Error('予算設定が不正です。');
@@ -72,7 +73,7 @@ export class BudgetLedger {
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === '/live') return openLiveSocket(this, request);
-    if (new URL(request.url).pathname === '/status') return json({ usage: { ...await this.usage(), budgetYen: config(this.env).budget }, model: MODEL });
+    if (new URL(request.url).pathname === '/status') return json({ usage: { ...await this.usage(), budgetYen: config(this.env).budget, appBudgetEnabled: appBudgetEnabled(this.env) }, model: MODEL });
     if (this.inFlight) return json({ error: '前の応答を待ってから送信してください。' }, 429, { 'Retry-After': '10' });
     this.inFlight = true;
     try { return await (path === '/live-ticket' ? this.liveTicket(request) : this.chat(request)); }
@@ -107,7 +108,7 @@ export class BudgetLedger {
     const reserve = reservation(payload, this.env);
     const recent = (await this.ctx.storage.get('rate') || []).filter(t => t > Date.now() - 60000);
     if (recent.length >= 6) return json({ error: '1分間の送信上限です。1分ほど待ってからお試しください。' }, 429, { 'Retry-After': '60' });
-    if (state.reservedYen + reserve > budget) return json({ error: '今月のアプリ予算上限に達しました。設定画面で利用量をご確認ください。' }, 429);
+    if (appBudgetEnabled(this.env) && state.reservedYen + reserve > budget) return json({ error: '今月のアプリ予算上限に達しました。設定画面で利用量をご確認ください。' }, 429);
     state.requests++; state.reservedYen += reserve; state.budgetYen = budget;
     await this.ctx.storage.put({ usage: state, rate: [...recent, Date.now()] });
     const body = { systemInstruction: { parts: [{ text: systemInstruction(payload) }] }, contents: payload.messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.text }] })), generationConfig: { maxOutputTokens: MAX_OUTPUT, temperature: 0.75, thinkingConfig: { thinkingLevel: 'minimal' } } };
