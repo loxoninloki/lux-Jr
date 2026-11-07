@@ -86,19 +86,30 @@ export async function openLiveSocket(ledger, request) {
       upstream.send(frame.raw);
     } catch { close('音声の形式または送信量を確認できないため終了しました。'); }
   });
-  upstream.addEventListener('message', event => {
+  // Decode asynchronously because Cloudflare can deliver binary WebSocket messages
+  // as Blob. Serialize decoding so audio chunks and turn markers remain ordered.
+  let upstreamMessages = Promise.resolve();
+  async function forwardUpstream(data) {
     if (closed) return;
-    // WebSocket servers may deliver either text or binary frames. Never echo the
-    // original frame or an exception to diagnostics: Live data can contain speech.
     let value;
     try {
-      if (typeof event.data === 'string') value = JSON.parse(event.data);
-      else if (event.data instanceof ArrayBuffer || ArrayBuffer.isView(event.data))
-        value = JSON.parse(new TextDecoder().decode(event.data));
+      let raw;
+      if (typeof data === 'string') raw = data;
+      else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data))
+        raw = new TextDecoder().decode(data);
+      else if (typeof Blob !== 'undefined' && data instanceof Blob)
+        raw = await data.text();
+      else if (data && typeof data.arrayBuffer === 'function')
+        raw = new TextDecoder().decode(await data.arrayBuffer());
       else { close('Gemini Liveから未対応の形式を受信しました。', 'live:upstream-unsupported-frame'); return; }
+      if (closed) return;
+      if (raw.length > 8 * 1024 * 1024) {
+        close('音声データが大きすぎます。', 'live:upstream-oversized-frame'); return;
+      }
+      value = JSON.parse(raw);
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('invalid response');
     } catch {
-      close('Gemini Liveの応答形式を解析できませんでした。', 'live:upstream-invalid-json');
+      if (!closed) close('Gemini Liveの応答形式を解析できませんでした。', 'live:upstream-invalid-json');
       return;
     }
     if (value.setupComplete) { ready = true; clearTimeout(handshake); }
@@ -111,6 +122,23 @@ export async function openLiveSocket(ledger, request) {
     catch { close('音声データの転送に失敗しました。', 'live:client-forward-failed'); return; }
     if (value.serverContent?.turnComplete && ++turns >= 12) close('今回の試用は12往復までです。');
     if (value.goAway) close('Geminiが接続を終了しました。再開には開始ボタンを押してください。');
+  }
+  let queuedFrames = 0;
+  upstream.addEventListener('message', event => {
+    const data = event.data;
+    // Normal text and ArrayBuffer frames retain synchronous forwarding.
+    // When a Blob is being decoded, subsequent messages wait for it.
+    const isBlob = typeof Blob !== 'undefined' && data instanceof Blob;
+    if (!queuedFrames && !isBlob) {
+      void forwardUpstream(data).catch(() => {
+        if (!closed) close('音声応答の処理を続けられませんでした。', 'live:upstream-processing-failed');
+      });
+      return;
+    }
+    queuedFrames++;
+    upstreamMessages = upstreamMessages.then(() => forwardUpstream(data)).catch(() => {
+      if (!closed) close('音声応答の処理を続けられませんでした。', 'live:upstream-processing-failed');
+    }).finally(() => { queuedFrames--; });
   });
   server.addEventListener('close',()=>close());server.addEventListener('error',()=>close('端末との接続が切れました。'));
   upstream.addEventListener('close',event=>{
