@@ -38,6 +38,18 @@ test('Live ticket accepts only a boolean opt-in for Google Search and keeps exis
  const bad=await ledger.fetch(send('true'));assert.equal(bad.status,400);
  const ok=await ledger.fetch(send(true));assert.equal(ok.status,200);
  const ticket=await ok.json();assert.equal(typeof ticket.ticket,'string');
- assert.equal(map.get('live-ticket').searchEnabled,true);
+ assert.equal(map.get('live-ticket').searchEnabled,false); // Free Tier must not send googleSearch.
+ assert.equal(ticket.searchAvailable,false);
+ assert.match(ticket.searchUnavailable,/検索なし/);
  assert.ok(map.get('usage').liveSessions>=1);
+});
+test('Live search can be explicitly enabled only through server configuration',async()=>{
+ const map=new Map();
+ const tx={async get(k){return structuredClone(map.get(k))},async put(k,v){if(typeof k==='object')for(const [name,value] of Object.entries(k))map.set(name,structuredClone(value));else map.set(k,structuredClone(v));},async delete(k){map.delete(k)}};
+ const e=env();e.ENABLE_GEMINI_LIVE_SEARCH='true';
+ const ledger=new BudgetLedger({storage:{...tx,transaction:fn=>fn(tx)}},e);
+ const req=new Request('https://unit.test/live-ticket',{method:'POST',body:JSON.stringify({messages:valid().messages,memories:[],freeTierConfirmed:true,searchEnabled:true})});
+ const response=await ledger.fetch(req);assert.equal(response.status,200);
+ const ticket=await response.json();assert.equal(ticket.searchAvailable,true);
+ assert.equal(map.get('live-ticket').searchEnabled,true);
 });
