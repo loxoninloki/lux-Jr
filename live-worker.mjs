@@ -39,7 +39,7 @@ export async function issueLiveTicket(ledger, instructions) {
       }
       await tx.delete('live-ticket');
     }
-    if (usage.reservedYen + LIVE_RESERVE_YEN > Number(ledger.env.MONTHLY_BUDGET_YEN || 1000)) {
+    if (ledger.env.DISABLE_APP_BUDGET_CAP !== 'true' && usage.reservedYen + LIVE_RESERVE_YEN > Number(ledger.env.MONTHLY_BUDGET_YEN || 1000)) {
       await tx.put('usage', usage);
       return { error:'アプリの月間予算上限です。設定で利用量をご確認ください。', status:429 };
     }
