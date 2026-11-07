@@ -1,6 +1,8 @@
 // Fixed model and trial limits. No API keys, instructions or setup controls reach clients.
 export const LIVE_MODEL = 'gemini-3.8-live';
-export const LIVE_SECONDS = 120;
+// null means that LUX does not impose a per-session time limit.
+// Gemini and the network may still end a Live connection.
+export const LIVE_SECONDS = null;
 export const LIVE_RESERVE_YEN = 100; // App-side conservative reservation, not an invoice.
 export function liveSetup(instructions) {
   return { setup: { model: `models/${LIVE_MODEL}`,
@@ -25,7 +27,10 @@ export async function issueLiveTicket(ledger, instructions) {
   return ledger.ctx.storage.transaction(async tx => {
     const previous = await tx.get('live-trial');
     const record = previous?.day === day ? previous : { day, count: 0, activeUntil: 0 };
-    if (record.activeUntil > now) return { error:'前のライブ接続が終了してから、2分ほど待ってお試しください。', status:429 };
+    // Keep a short ticket-start guard, and refuse parallel open sessions regardless
+    // of duration. The live socket releases this in-memory lock on closure.
+    if (ledger.liveSessionLock) return { error:'すでに音声会話が接続されています。終了してから再度お試しください。', status:429 };
+    if (record.activeUntil > now) return { error:'前の音声会話の接続処理中です。少し待ってから再度お試しください。', status:429 };
     const savedUsage = await tx.get('usage');
     const usage = savedUsage?.month === baseUsage.month ? savedUsage : baseUsage;
     // A ticket that expired without ever opening a WebSocket cannot incur Live usage.
@@ -44,7 +49,8 @@ export async function issueLiveTicket(ledger, instructions) {
       return { error:'アプリの月間予算上限です。設定で利用量をご確認ください。', status:429 };
     }
     const ticket = crypto.randomUUID();
-    record.count++; record.activeUntil = now + (LIVE_SECONDS + 20) * 1000;
+    // 20-second single-use ticket TTL is for admission control, not conversation length.
+    record.count++; record.activeUntil = now + 20000;
     usage.reservedYen += LIVE_RESERVE_YEN; usage.liveSessions = (usage.liveSessions || 0) + 1;
     // Only one outstanding ticket, consumed before opening the upstream connection.
     await tx.put({ 'live-trial':record, 'live-ticket':{ ticket, expires:now+20000, instructions, month:usage.month, reservedYen:LIVE_RESERVE_YEN }, usage });
@@ -53,6 +59,7 @@ export async function issueLiveTicket(ledger, instructions) {
 }
 export async function openLiveSocket(ledger, request) {
   if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return new Response('WebSocket required',{status:426});
+  if (ledger.liveSessionLock) return new Response('Live session already active',{status:409});
   const ticket = new URL(request.url).searchParams.get('ticket');
   const saved = await ledger.ctx.storage.transaction(async tx => {
     const value = await tx.get('live-ticket');
@@ -60,29 +67,32 @@ export async function openLiveSocket(ledger, request) {
     await tx.delete('live-ticket'); return value;
   });
   if (!saved) return new Response('接続券の期限が切れました。開始ボタンを押してください。',{status:401});
+  const sessionId = crypto.randomUUID();
+  ledger.liveSessionLock = sessionId;
+  const release = () => { if (ledger.liveSessionLock === sessionId) ledger.liveSessionLock = null; };
   let upstream;
   try {
     const response = await fetch(`https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(ledger.env.GEMINI_API_KEY)}`, { headers:{Upgrade:'websocket'},signal:AbortSignal.timeout(15000) });
     upstream = response.webSocket;
-    if (!upstream) return new Response('Gemini Liveに接続できません。無料枠またはモデルの利用権限をご確認ください。',{status:503});
+    if (!upstream) { release(); return new Response('Gemini Liveに接続できません。無料枠またはモデルの利用権限をご確認ください。',{status:503}); }
     upstream.accept();
-  } catch { return new Response('Gemini Liveへの接続に失敗しました。',{status:503}); }
+  } catch { release(); return new Response('Gemini Liveへの接続に失敗しました。',{status:503}); }
   const pair = new WebSocketPair(), client = pair[0], server = pair[1]; server.accept();
   let closed = false, ready = false, turns = 0, bytes = 0;
   const started = Date.now();
   const close = (message = 'ライブ会話を終了しました。', diagnostic = '') => {
-    if (closed) return; closed = true; clearTimeout(limit); clearTimeout(handshake);
-    try { server.send(JSON.stringify({luxClosed:message,luxDiagnostic:diagnostic})); server.close(1000,'Live trial ended'); } catch {}
-    try { upstream.close(1000,'Live trial ended'); } catch {}
+    if (closed) return; closed = true; clearTimeout(handshake); release();
+    try { server.send(JSON.stringify({luxClosed:message,luxDiagnostic:diagnostic})); server.close(1000,'Live session ended'); } catch {}
+    try { upstream.close(1000,'Live session ended'); } catch {}
   };
-  const limit = setTimeout(()=>close('2分間のライブ試用を終了しました。'), LIVE_SECONDS*1000);
-  const handshake = setTimeout(()=>close('Gemini Liveの開始を確認できません。無料枠の利用権限をご確認ください。','live:setup-timeout'), 15000);
+   const handshake = setTimeout(()=>close('Gemini Liveの開始を確認できません。無料枠の利用権限をご確認ください。','live:setup-timeout'), 15000);
   server.addEventListener('message', event => {
     if (closed) return;
     try {
       if (!ready) throw Error('not ready');
       const frame = validateLiveAudio(event.data); bytes += frame.bytes;
-      if (bytes > 32000 * (Math.min(LIVE_SECONDS,(Date.now()-started)/1000)+2)) throw Error('rate');
+      // Rate bound grows with elapsed time; it never becomes a fixed session cap.
+      if (bytes > 32000 * ((Date.now()-started)/1000+2)) throw Error('rate');
       upstream.send(frame.raw);
     } catch { close('音声の形式または送信量を確認できないため終了しました。'); }
   });
@@ -120,7 +130,7 @@ export async function openLiveSocket(ledger, request) {
     }
     try { server.send(JSON.stringify(value)); }
     catch { close('音声データの転送に失敗しました。', 'live:client-forward-failed'); return; }
-    if (value.serverContent?.turnComplete && ++turns >= 12) close('今回の試用は12往復までです。');
+    if (value.serverContent?.turnComplete) turns++;
     if (value.goAway) close('Geminiが接続を終了しました。再開には開始ボタンを押してください。');
   }
   let queuedFrames = 0;
@@ -144,7 +154,7 @@ export async function openLiveSocket(ledger, request) {
   upstream.addEventListener('close',event=>{
     const code = Number(event.code);
     const label = Number.isInteger(code) && code >= 1000 && code < 5000 ? `（${code}）` : '';
-    close(`Gemini Liveの接続が終了しました${label}。${ready ? '利用制限の場合は時間を置いてお試しください。' : '開始設定が受理されていません。モデルの利用権限・無料枠をご確認ください。'}`,label?`live:upstream-close-${code}`:'live:upstream-error');
+    close(code === 1006 ? 'Gemini Liveとの通信が予期せず切断されました（1006）。通信環境やGoogle側の利用状況をご確認ください。' : `Gemini Liveの接続が終了しました${label}。${ready ? '利用制限の場合は時間を置いてお試しください。' : '開始設定が受理されていません。モデルの利用権限・無料枠をご確認ください。'}`,label?`live:upstream-close-${code}`:'live:upstream-error');
   });
   upstream.addEventListener('error',()=>close('Gemini Liveと通信できませんでした。'));
   try { upstream.send(JSON.stringify(liveSetup(saved.instructions))); } catch { close('音声会話の設定に失敗しました。'); }
