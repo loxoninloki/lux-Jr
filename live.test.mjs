@@ -20,6 +20,30 @@ test('trial tickets reserve app budget and prevent simultaneous trials without a
  assert.equal(l.values.get('live-trial').count,5);
  assert.equal((await l.usage()).reservedYen,500);
 });
+test('expired unused Live ticket releases only its reservation',async()=>{
+ const l=ledger();const first=await issueLiveTicket(l,'persona');
+ assert.ok(first.ticket);
+ const ticket=l.values.get('live-ticket');ticket.expires=Date.now()-1;
+ l.values.get('live-trial').activeUntil=0;
+ const second=await issueLiveTicket(l,'persona');
+ assert.ok(second.ticket);
+ assert.equal(l.values.get('usage').reservedYen,100);
+ assert.equal(l.values.get('usage').unusedLiveTickets,1);
+});
+test('consumed Live ticket is never refunded',async()=>{
+ const l=ledger();await issueLiveTicket(l,'persona');
+ l.values.delete('live-ticket');l.values.get('live-trial').activeUntil=0;
+ await issueLiveTicket(l,'persona');
+ assert.equal(l.values.get('usage').reservedYen,200);
+});
+test('expired unused ticket is recovered even when budget was full',async()=>{
+ const l=ledger(100);await issueLiveTicket(l,'persona');
+ l.values.get('live-ticket').expires=Date.now()-1;
+ l.values.get('live-trial').activeUntil=0;
+ const result=await issueLiveTicket(l,'persona');
+ assert.ok(result.ticket);
+ assert.equal(l.values.get('usage').reservedYen,100);
+});
 test('monthly app cap rejects live before issuing a ticket',async()=>{
  const l=ledger(50);assert.equal((await issueLiveTicket(l,'persona')).status,429);assert.equal(l.values.has('live-ticket'),false);
 });
