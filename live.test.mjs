@@ -69,12 +69,14 @@ test('server keeps Live sockets open after 120 seconds and prevents parallel ses
  const upstream=new Socket();let pair;const originalResponse=globalThis.Response,originalPair=globalThis.WebSocketPair;
  globalThis.Response=class{constructor(body,options){this.status=options.status;this.webSocket=options.webSocket}};
  globalThis.WebSocketPair=class{constructor(){this[0]=new Socket();this[1]=new Socket();pair=this}};
- t.mock.method(globalThis,'fetch',async()=>({webSocket:upstream}));t.after(()=>{globalThis.Response=originalResponse;globalThis.WebSocketPair=originalPair});
+ let upgradeSignal;
+ t.mock.method(globalThis,'fetch',async(_url,init)=>{upgradeSignal=init.signal;return {webSocket:upstream};});t.after(()=>{globalThis.Response=originalResponse;globalThis.WebSocketPair=originalPair});
  const l=ledger();l.env.GEMINI_API_KEY='unit-test-only';const ticket=await issueLiveTicket(l,'persona');
  const request=new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}});
  const response=await openLiveSocket(l,request);assert.equal(response.status,101);assert.equal(l.values.has('live-ticket'),false);
+ assert.equal(upgradeSignal.aborted,false);
  upstream.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({setupComplete:{}})}));
- t.mock.timers.tick(121000);assert.equal(pair[1].closed,false);assert.equal(upstream.closed,false);
+ t.mock.timers.tick(121000);assert.equal(upgradeSignal.aborted,false);assert.equal(pair[1].closed,false);assert.equal(upstream.closed,false);
  for(let i=0;i<15;i++)upstream.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({serverContent:{turnComplete:true}})}));
  assert.equal(pair[1].closed,false);assert.equal(upstream.closed,false);
  l.values.get('live-trial').activeUntil=0;
@@ -82,6 +84,25 @@ test('server keeps Live sockets open after 120 seconds and prevents parallel ses
  assert.equal((await openLiveSocket(l,request)).status,409); // locked (and one-use)
  pair[1].dispatchEvent(new Event('close'));assert.equal(upstream.closed,true);
  assert.equal((await openLiveSocket(l,request)).status,401);
+ assert.ok((await issueLiveTicket(l,'persona')).ticket);
+});
+
+test('pending Gemini Live upgrade is aborted after 15 seconds without leaving a stuck lock',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ let signal;
+ t.mock.method(globalThis,'fetch',async(_url,init)=>{
+   signal=init.signal;
+   return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Error('connect-timeout')),{once:true}));
+ });
+ const l=ledger();l.env.GEMINI_API_KEY='unit-test-only';
+ const ticket=await issueLiveTicket(l,'persona');
+ const pending=openLiveSocket(l,new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}}));
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.ok(signal);assert.equal(signal.aborted,false);
+ t.mock.timers.tick(15000);
+ const response=await pending;assert.equal(response.status,503);
+ assert.equal(signal.aborted,true);
+ l.values.get('live-trial').activeUntil=0;
  assert.ok((await issueLiveTicket(l,'persona')).ticket);
 });
 

@@ -71,12 +71,19 @@ export async function openLiveSocket(ledger, request) {
   ledger.liveSessionLock = sessionId;
   const release = () => { if (ledger.liveSessionLock === sessionId) ledger.liveSessionLock = null; };
   let upstream;
+  // IMPORTANT: AbortSignal.timeout(15000) aborts even AFTER fetch resolves.
+  // On a WebSocket upgrade that may sever the live socket every ~15 seconds.
+  // Limit only the pending handshake, and clear the timeout as soon as fetch
+  // finishes; never abort an established voice WebSocket.
+  const handshakeAbort = new AbortController();
+  const connectTimeout = setTimeout(() => handshakeAbort.abort(), 15000);
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(ledger.env.GEMINI_API_KEY)}`, { headers:{Upgrade:'websocket'},signal:AbortSignal.timeout(15000) });
+    const response = await fetch(`https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(ledger.env.GEMINI_API_KEY)}`, { headers:{Upgrade:'websocket'},signal:handshakeAbort.signal });
     upstream = response.webSocket;
     if (!upstream) { release(); return new Response('Gemini Liveに接続できません。無料枠またはモデルの利用権限をご確認ください。',{status:503}); }
     upstream.accept();
   } catch { release(); return new Response('Gemini Liveへの接続に失敗しました。',{status:503}); }
+  finally { clearTimeout(connectTimeout); }
   const pair = new WebSocketPair(), client = pair[0], server = pair[1]; server.accept();
   let closed = false, ready = false, turns = 0, bytes = 0;
   const started = Date.now();
