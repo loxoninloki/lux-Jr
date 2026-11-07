@@ -123,12 +123,18 @@ test('recognition errors record only safe codes and stale audio callbacks are ig
 });
 
 test('a start timeout switches following replies to gesture playback without resending requests',async()=>{
- let plays=0,learned=0;const h=setup({speak:async()=>{if(++plays===1)throw Object.assign(Error('blocked'),{code:'speech-start-timeout'})},playbackGestureRequired:()=>learned++});
+ let plays=0,learned=0;const h=setup({speak:async()=>{if(++plays<=2)throw Object.assign(Error('blocked'),{code:'speech-start-timeout'})},playbackGestureRequired:()=>learned++});
  h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();assert.equal(h.session.phase,'paused');assert.equal(learned,1);
- h.session.resume();await flush();assert.equal(plays,2);assert.equal(h.requests.length,1);
+ h.session.resume();await flush();assert.equal(plays,3);assert.equal(h.requests.length,1);
  h.result(h.recognizers[1],'次の言葉');h.recognizers[1].onend();await flush();
- assert.equal(h.session.phase,'paused');assert.equal(plays,2);assert.equal(h.requests.length,2);
- h.session.resume();await flush();assert.equal(plays,3);assert.equal(h.requests.length,2);h.session.stop();
+ assert.equal(h.session.phase,'paused');assert.equal(plays,3);assert.equal(h.requests.length,2);
+ h.session.resume();await flush();assert.equal(plays,4);assert.equal(h.requests.length,2);h.session.stop();
+});
+test('one transient Safari start timeout recovers automatically without asking for a tap',async()=>{
+ let plays=0,learned=0;const h=setup({speak:async()=>{if(++plays===1)throw Object.assign(Error('blocked'),{code:'speech-start-timeout'})},playbackGestureRequired:()=>learned++});
+ h.session.start();h.result(h.recognizers[0]);h.recognizers[0].onend();await flush();
+ assert.equal(plays,2);assert.equal(learned,0);assert.equal(h.requests.length,1);
+ assert.equal(h.session.phase,'listening');h.session.stop();
 });
 test('preferred gesture mode queues a reply and starts speak synchronously on one click',async()=>{
  let plays=0,endPlayback;const h=setup({preferPlaybackGesture:true,speak:()=>{plays++;return new Promise(r=>endPlayback=r)}});
