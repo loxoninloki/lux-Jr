@@ -25,3 +25,15 @@
 .live-health .primary { margin-top: .35rem; }
 
 .dictation-status { color: #d5c0f2; font-size: 11px; line-height: 1.6; margin: 5px 0; }
+
+/* Voice diagnostics: the copy control must remain visible without opening details. */
+.voice-log-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;margin-bottom:14px}
+.voice-log-toolbar>div{flex:1 1 180px;min-width:0}
+.voice-log-toolbar h2{margin:0 0 6px}
+.voice-log-toolbar .muted{margin:0}
+.voice-log-copy{min-height:44px;padding:11px 15px;white-space:normal;text-align:center;flex:0 1 auto}
+.voice-log-danger-area{display:flex;justify-content:flex-end;margin-top:14px}
+.voice-log-delete{color:#f2a1b3!important;border:1px solid #e68ba058!important;background:#e68ba014!important;border-radius:10px;padding:10px 14px;min-height:44px;font-size:12px;font-weight:600}
+.voice-log-delete:disabled{opacity:.4}
+.voice-log-card .voice-diagnostics{max-height:280px;overflow:auto;user-select:text;-webkit-user-select:text}
+@media(max-width:500px){.voice-log-copy{width:100%;flex:1 1 100%}}
