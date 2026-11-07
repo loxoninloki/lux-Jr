@@ -20,3 +20,11 @@ test('voice mode uses a spoken reply instruction and rejects arbitrary mode valu
   assert.doesNotMatch(systemInstruction(base),/現在は音声会話モード/);
   assert.throws(()=>validate({...base,voiceMode:'true'}));
 });
+
+test('explicit free-tier mode disables app cap but keeps usage accounting', async () => {
+ const e=env();e.MONTHLY_BUDGET_YEN='0.01';e.DISABLE_APP_BUDGET_CAP='true';
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({candidates:[{content:{parts:[{text:'応答'}]}}],usageMetadata:{promptTokenCount:10,candidatesTokenCount:5}});
+ try {const ctx=context();const response=await new BudgetLedger(ctx,e).fetch(request());assert.equal(response.status,200);assert.equal((await ctx.storage.get('usage')).requests,1);}
+ finally {globalThis.fetch=original;}
+});
