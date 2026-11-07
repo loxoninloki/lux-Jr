@@ -4,8 +4,11 @@ export const LIVE_MODEL = 'gemini-3.8-live';
 // Gemini and the network may still end a Live connection.
 export const LIVE_SECONDS = null;
 export const LIVE_RESERVE_YEN = 100; // App-side conservative reservation, not an invoice.
-export function liveSetup(instructions) {
+export function liveSetup(instructions, searchEnabled = false) {
   return { setup: { model: `models/${LIVE_MODEL}`,
+    // Google Search is built in to Gemini Live. Only the server controls tools;
+    // no arbitrary client tool declarations or credentials are accepted.
+    ...(searchEnabled ? { tools: [{ googleSearch: {} }] } : {}),
     generationConfig: { responseModalities: ['AUDIO'], maxOutputTokens: 1024,
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } },
     systemInstruction: { parts: [{ text: instructions }] },
@@ -27,7 +30,7 @@ export function validateLiveAudio(raw) {
   if (bytes % 2 || !bytes) throw Error('pcm');
   return { raw: JSON.stringify({ realtimeInput: { audio: { data: audio.data, mimeType: audio.mimeType } } }), bytes };
 }
-export async function issueLiveTicket(ledger, instructions) {
+export async function issueLiveTicket(ledger, instructions, searchEnabled = false) {
   const baseUsage = await ledger.usage();
   const now = Date.now(), day = new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Tokyo'}).format(new Date(now));
   return ledger.ctx.storage.transaction(async tx => {
@@ -59,7 +62,7 @@ export async function issueLiveTicket(ledger, instructions) {
     record.count++; record.activeUntil = now + 20000;
     usage.reservedYen += LIVE_RESERVE_YEN; usage.liveSessions = (usage.liveSessions || 0) + 1;
     // Only one outstanding ticket, consumed before opening the upstream connection.
-    await tx.put({ 'live-trial':record, 'live-ticket':{ ticket, expires:now+20000, instructions, month:usage.month, reservedYen:LIVE_RESERVE_YEN }, usage });
+    await tx.put({ 'live-trial':record, 'live-ticket':{ ticket, expires:now+20000, instructions, searchEnabled: searchEnabled === true, month:usage.month, reservedYen:LIVE_RESERVE_YEN }, usage });
     return { ticket, seconds:LIVE_SECONDS, model:LIVE_MODEL, usage };
   });
 }
@@ -170,6 +173,6 @@ export async function openLiveSocket(ledger, request) {
     close(code === 1006 ? 'Gemini Liveとの通信が予期せず切断されました（1006）。通信環境やGoogle側の利用状況をご確認ください。' : `Gemini Liveの接続が終了しました${label}。${ready ? '利用制限の場合は時間を置いてお試しください。' : '開始設定が受理されていません。モデルの利用権限・無料枠をご確認ください。'}`,label?`live:upstream-close-${code}`:'live:upstream-error');
   });
   upstream.addEventListener('error',()=>close('Gemini Liveと通信できませんでした。'));
-  try { upstream.send(JSON.stringify(liveSetup(saved.instructions))); } catch { close('音声会話の設定に失敗しました。'); }
+  try { upstream.send(JSON.stringify(liveSetup(saved.instructions, saved.searchEnabled === true))); } catch { close('音声会話の設定に失敗しました。'); }
   return new Response(null,{status:101,webSocket:client});
 }

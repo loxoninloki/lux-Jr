@@ -15,6 +15,8 @@ test('live model and audio-only setup are fixed; client controls cannot set the 
  assert.equal(vad.startOfSpeechSensitivity,'START_SENSITIVITY_LOW');
  assert.equal(vad.prefixPaddingMs,450);
  assert.equal(vad.silenceDurationMs,900);
+ assert.equal('tools' in setup,false); // Default Live remains backward-compatible.
+ assert.deepEqual(liveSetup('test persona',true).setup.tools,[{googleSearch:{}}]);
  assert.doesNotThrow(()=>validateLiveAudio(JSON.stringify({realtimeInput:{audio:{data:'AAA=',mimeType:'audio/pcm;rate=16000'}}})));
  for(const data of [{setup:{model:'other'}},{realtimeInput:{text:'inject'}},{realtimeInput:{audio:{data:'AA==',mimeType:'audio/pcm;rate=16000'}}}])assert.throws(()=>validateLiveAudio(JSON.stringify(data)));
 });
@@ -313,4 +315,34 @@ test('microphone continues sending through playback for three server turns',asyn
   capture.port.onmessage({data:{pcm:new ArrayBuffer(3200),level:.1}});h.socket.onmessage({data:JSON.stringify({serverContent:{turnComplete:true}})});h.sources.at(-1).onended();
  }
  assert.equal(h.socket.sent.length,6);assert.equal(health.completedTurns,3);assert.equal(h.capture,capture);assert.equal(h.tracks[0].stopped,false);
+});
+
+test('Gemini Live grounding extracts HTTPS source links without exposing unsafe URLs',async()=>{
+ const {extractLiveGrounding}=await import('./live-grounding.ts');
+ assert.equal(extractLiveGrounding({serverContent:{turnComplete:true}}),null);
+ const result=extractLiveGrounding({serverContent:{groundingMetadata:{
+   webSearchQueries:['最新のニュース'],
+   groundingChunks:[{web:{uri:'https://example.org/latest',title:'最新記事'}},{web:{uri:'javascript:alert(1)',title:'攻撃'}}],
+   searchEntryPoint:{renderedContent:'<style>.g{color:purple}</style><div>Googleで検索</div>'}
+ }}});assert.ok(result);
+ assert.deepEqual(result.sources,[{url:'https://example.org/latest',title:'最新記事'}]);
+ assert.equal(result.searches,1);
+ assert.match(result.searchSuggestions,/Googleで検索/);
+ assert.equal(extractLiveGrounding({groundingMetadata:{groundingChunks:[{web:{uri:'http://insecure.test/'}}]}}),null);
+});
+test('Live search is forwarded through the one-use ticket and not enabled implicitly',async t=>{
+ class Socket extends EventTarget {sent=[];closed=false;accept(){}send(value){this.sent.push(value)}close(){this.closed=true}}
+ const upstream=new Socket();
+ const originalResponse=globalThis.Response,originalPair=globalThis.WebSocketPair;
+ globalThis.Response=class{constructor(_body,options){this.status=options.status;this.webSocket=options.webSocket}};
+ globalThis.WebSocketPair=class{constructor(){this[0]=new Socket();this[1]=new Socket();}};
+ t.mock.method(globalThis,'fetch',async()=>({webSocket:upstream}));
+ t.after(()=>{globalThis.Response=originalResponse;globalThis.WebSocketPair=originalPair});
+ const l=ledger();l.env.GEMINI_API_KEY='unit-test-only';
+ const ticket=await issueLiveTicket(l,'最新情報を調べる',true);
+ assert.equal(l.values.get('live-ticket').searchEnabled,true);
+ const r=await openLiveSocket(l,new Request(`https://unit.test/live?ticket=${ticket.ticket}`,{headers:{Upgrade:'websocket'}}));
+ assert.equal(r.status,101);
+ assert.deepEqual(JSON.parse(upstream.sent[0]).setup.tools,[{googleSearch:{}}]);
+ upstream.dispatchEvent(new Event('close'));
 });

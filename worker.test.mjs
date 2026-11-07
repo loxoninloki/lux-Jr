@@ -28,3 +28,16 @@ test('explicit free-tier mode disables app cap but keeps usage accounting', asyn
  try {const ctx=context();const response=await new BudgetLedger(ctx,e).fetch(request());assert.equal(response.status,200);assert.equal((await ctx.storage.get('usage')).requests,1);}
  finally {globalThis.fetch=original;}
 });
+
+test('Live ticket accepts only a boolean opt-in for Google Search and keeps existing usage',async()=>{
+ const map=new Map();
+ const tx={async get(k){return structuredClone(map.get(k))},async put(k,v){if(typeof k==='object')for(const [name,value] of Object.entries(k))map.set(name,structuredClone(value));else map.set(k,structuredClone(v));},async delete(k){map.delete(k)}};
+ const ctx={storage:{...tx,transaction:async fn=>fn(tx)}};
+ const ledger=new BudgetLedger(ctx,env());
+ const send=searchEnabled=>new Request('https://unit.test/live-ticket',{method:'POST',body:JSON.stringify({messages:valid().messages,memories:[],freeTierConfirmed:true,searchEnabled})});
+ const bad=await ledger.fetch(send('true'));assert.equal(bad.status,400);
+ const ok=await ledger.fetch(send(true));assert.equal(ok.status,200);
+ const ticket=await ok.json();assert.equal(typeof ticket.ticket,'string');
+ assert.equal(map.get('live-ticket').searchEnabled,true);
+ assert.ok(map.get('usage').liveSessions>=1);
+});
