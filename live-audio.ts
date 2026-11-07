@@ -10,7 +10,7 @@ export type LiveHealth = {
 type LivePorts = {
   phase(value: VoicePhase): void; error(text: string): void; diagnostic(event: string): void;
   transcript(user: string, assistant: string): void; preview(text: string): void;
-  ticket(signal: AbortSignal): Promise<{ticket: string; seconds: number; endpoint: string}>;
+  ticket(signal: AbortSignal): Promise<{ticket: string; seconds: number | null; endpoint: string}>;
   health?(value: LiveHealth): void;
 };
 const idleHealth = (): LiveHealth => ({stage: '停止中', inputLevel: 0, sentFrames: 0, receivedChunks: 0, needsResume: false, muted: false, localTest: false, completedTurns: 0});
@@ -190,15 +190,17 @@ export class LiveConversation {
       this.stop(name === 'NotAllowedError' ? 'マイクの許可が必要です。Safariのサイト設定をご確認ください。' : error instanceof Error ? error.message : '音声会話を開始できませんでした。');
     }
   }
-  private connect(ticket: {ticket: string; seconds: number; endpoint: string}, generation: number) {
-    if (!ticket.ticket || !Number.isFinite(ticket.seconds) || ticket.seconds <= 0) throw Error('サーバーの音声会話設定を確認できません。');
+  private connect(ticket: {ticket: string; seconds: number | null; endpoint: string}, generation: number) {
+    if (!ticket.ticket || (ticket.seconds !== null && (!Number.isFinite(ticket.seconds) || ticket.seconds <= 0))) throw Error('サーバーの音声会話設定を確認できません。');
     const url = new URL(ticket.endpoint);
     if (url.protocol !== 'https:') throw Error('音声会話にはHTTPSのサーバーが必要です。');
     url.protocol = 'wss:'; url.pathname = '/live'; url.search = ''; url.hash = ''; url.searchParams.set('ticket', ticket.ticket);
     const socket = new WebSocket(url); this.socket = socket; socket.binaryType = 'arraybuffer';
     this.report('音声会話の接続完了を待っています。'); this.ports.diagnostic('live:ticket-issued'); this.ports.diagnostic('live:websocket-connecting');
     this.handshake = setTimeout(() => { if (this.active(generation)) { this.ports.diagnostic('live:setup-timeout'); this.stop('接続設定が受理されませんでした。サーバーとモデルの利用権限をご確認ください。'); } }, 20000);
-    this.limit = setTimeout(() => { if (this.active(generation)) this.stop('2分間のライブ試用を終了しました。'); }, Math.min(ticket.seconds, 120) * 1000);
+    // null means the app never ends the call by elapsed time. Older Workers may
+    // still provide a positive limit while both deployments are rolling out.
+    if (ticket.seconds !== null) this.limit = setTimeout(() => { if (this.active(generation)) this.stop('サーバーの指定した音声会話時間が終了しました。'); }, ticket.seconds * 1000);
     socket.onopen = () => { if (this.active(generation)) this.ports.diagnostic('live:websocket-open'); };
     // Blob decoding is asynchronous: serialize messages so audio/interruption order is retained.
     let messages = Promise.resolve(); let queued = 0;
